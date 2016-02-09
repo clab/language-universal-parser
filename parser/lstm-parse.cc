@@ -151,6 +151,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     // TRAINING VS. DECODING PARAMETERS
     ("train,t", "Should training be run?")
     ("model,m", po::value<string>(), "Load saved model from this file")
+    ("server", "Should run the parser as a server which reads input sentences from STDIN and writes the predictiosn to STDOUT?")
     // DROPOUT PARAMETERS
     ("dropout", po::value<double>()->default_value(0.0),
      "dropout coefficient for individual elements in the token embedding, "
@@ -503,8 +504,8 @@ struct ParserBuilder {
       Expression observed_typology = const_lookup(hg, p_observed_typology, sent[0].lang_id);
       vector<float> observed_typology_vector = as_vector(hg.incremental_forward());
       compressed_typology = tanh(observed_to_compressed_typology * observed_typology);
-      if (training && block_dropout_typology_embedding > 0.0) {
-	compressed_typology = block_dropout(compressed_typology, block_dropout_typology_embedding);
+      if (build_training_graph && BLOCK_DROPOUT_TYPOLOGY_EMBEDDING > 0.0) {
+	compressed_typology = block_dropout(compressed_typology, BLOCK_DROPOUT_TYPOLOGY_EMBEDDING);
       }
       hg.incremental_forward();
       // TODO(wammar): visualize the language embeddings here
@@ -991,7 +992,8 @@ unsigned compute_correct(const unordered_map<int,int>& ref, const unordered_map<
 }
 
 void output_conll(const vector<TokenInfo>& sentence,
-                  const unordered_map<int,int>& hyp, const unordered_map<int,string>& rel_hyp) {
+                  const unordered_map<int,int>& hyp, 
+		  const unordered_map<int,string>& rel_hyp) {
   for (unsigned i = 0; i < (sentence.size()-1); ++i) {
     auto index = i + 1;
     string wit = corpus.intToWords.at(sentence[i].word_id);
@@ -1537,7 +1539,46 @@ int main(int argc, char** argv) {
     cerr << "done." << endl;
     
   } // should do training?
-  if (true) { // do test evaluation
+
+  // keep the parser running in the background to serve other processes.
+  if (conf.count("server")) {
+    while (true) {
+      // read input
+      string input_sentence;
+      getline(cin, input_sentence);
+
+      // interpret input
+      if (input_sentence == "QUIT" || input_sentence == "EXIT") { break; }
+      istringstream input_sentence_stream(input_sentence);
+      vector<TokenInfo> sentence;
+      while (true) { 
+	string lang_word_pos;
+	input_sentence_stream >> lang_word_pos;
+	if (lang_word_pos.size() == 0) { break; }
+	TokenInfo current_token;
+	corpus.ReadTokenInfo(lang_word_pos, current_token);
+	current_token.training_oov = (corpus.training_vocab.count(current_token.word_id) == 0);
+	sentence.push_back(current_token);
+      }
+      
+      // parse!
+      double right = 0;
+      ComputationGraph cg;
+      vector<unsigned> pred;
+      auto t_start = std::chrono::high_resolution_clock::now();
+      parser.log_prob_parser(cg, sentence, vector<unsigned>(), corpus.actions, &right, pred);
+      auto t_end = std::chrono::high_resolution_clock::now();
+
+      // compute heads
+      unordered_map<int, string> rel_hyp;
+      unordered_map<int,int> hyp = parser.compute_heads(sentence.size(), pred, corpus.actions, &rel_hyp);
+      output_conll(sentence, hyp, rel_hyp);
+
+      // print output
+      cerr << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms" << endl;
+    }
+    cerr << "The language-universal dependency parsing service has been terminated." << endl;
+  } else { // do test evaluation
 
     double llh = 0;
     double trs = 0;

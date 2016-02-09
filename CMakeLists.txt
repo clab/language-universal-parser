@@ -8,7 +8,18 @@ enable_testing()
 
 #include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/cnn)
-set(WITH_EIGEN_BACKEND 1)
+
+# BACKEND=cuda?
+if(BACKEND MATCHES "^cuda$")
+  set(WITH_CUDA_BACKEND 1)
+  find_package(CUDA REQUIRED)
+  set(CUDA_TOOLKIT_ROOT_DIR ${CUDA_ROOT})
+  include_directories(SYSTEM ${CUDA_INCLUDE_DIRS})
+  add_definitions(-DHAVE_CUDA)
+  MESSAGE("CUDA_LIBRARIES: ${CUDA_LIBRARIES}")
+  list(REMOVE_ITEM CUDA_LIBRARIES -lpthread)
+  set(LIBS ${LIBS} ${CUDA_LIBRARIES})
+endif()
 
 # look for Boost
 set(Boost_REALPATH ON)
@@ -19,6 +30,7 @@ set(LIBS ${LIBS} ${Boost_LIBRARIES})
 # look for Eigen
 find_package(Eigen3 REQUIRED)
 include_directories(${EIGEN3_INCLUDE_DIR})
+set(WITH_EIGEN_BACKEND 1)
 
 #configure_file(${CMAKE_CURRENT_SOURCE_DIR}/config.h.cmake ${CMAKE_CURRENT_BINARY_DIR}/config.h)
 
