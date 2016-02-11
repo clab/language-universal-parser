@@ -1558,6 +1558,9 @@ int main(int argc, char** argv) {
   // keep the parser running in the background to serve other processes.
   if (conf.count("server")) {
     while (true) {
+      // prompt for input
+      cerr << "Type in a sequence of tokens, e.g., `en:he-pron en:is-verb en:stupid-adj', then press ENTER" << endl;
+      
       // read input
       string input_sentence;
       getline(cin, input_sentence);
@@ -1569,12 +1572,17 @@ int main(int argc, char** argv) {
       while (true) { 
 	string lang_word_pos;
 	input_sentence_stream >> lang_word_pos;
+	cerr << "lang_word_pos = " << lang_word_pos << endl;
 	if (lang_word_pos.size() == 0) { break; }
 	TokenInfo current_token;
 	corpus.ReadTokenInfo(lang_word_pos, current_token);
 	current_token.training_oov = (corpus.training_vocab.count(current_token.word_id) == 0);
 	sentence.push_back(current_token);
       }
+      TokenInfo root_token;
+      corpus.ReadTokenInfo("ROOT-ROOT", root_token);
+      root_token.training_oov = (corpus.training_vocab.count(root_token.word_id) == 0);
+      sentence.push_back(root_token);
       
       // parse!
       double right = 0;
