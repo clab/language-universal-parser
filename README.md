@@ -1,38 +1,39 @@
-# lstm-parser
-Transition based dependency parser with state embeddings computed by LSTM RNNs
+# Dependencies
+* boost-1.60.0
+* eigen `hg clone https://bitbucket.org/eigen/eigen`
 
-# Checking out the project for the first time
+# How to generate arc-standard transitions?
+The parser expects projective treebanks with arc-standard transitions as input (see command lines below). To convert nonprojective treebanks in CoNLL 2006 format to the arc-std oracle files of the pseudo-projective treebanks:    
+```    
+java -jar maltparser-1.8.1.jar -c pproj -m proj -i $split_lc -o $split_projective -pp baseline
+java -jar ParserOracleArcStd.jar -t -1 -l 1 -c treebank.conll -i treebank.conll > treebank.arcstd
+```
 
-The first time you clone the repository, you need to sync the `cnn/` submodule.
+# How to use?
+```
+# setup repository #
+cd
+mkdir git ; cd git/
+git clone git@github.com:clab/language-universal-parser.git
+cd language-universal-parser
+git submodule init
+git submodule update
+cd cnn
+git pull origin master
+cd ../
 
-    git submodule init
-    git submodule update
+# build the parser (with latest version of cnn) #
+cd ~/git/language-universal-parser/cnn
+git pull origin master
+cd .. ; mkdir build-gpu ; cd build-gpu
+cmake -DEIGEN3_INCLUDE_DIR=$EIGEN_ROOT ..  # -DBACKEND=cuda is not supported just yet
+make -j 10
 
-# Build instructions
+# train the parser on small data #
+~/git/language-universal-parser/build-gpu/parser/lstm-parse --train -P --training_data $TRAIN_ARCSTD --dev_data $DEV_ARCSTD --pretrained_dim 50 --pretrained $PRETRAINED_EMBEDDINGS --brown_clusters $PRETRAINED_CLUSTERS --epochs 1
+```
 
-    mkdir build
-    cd build
-    cmake -DEIGEN3_INCLUDE_DIR=/opt/tools/eigen-dev ..
-    (in allegro: cmake -DEIGEN3_INCLUDE_DIR=/opt/tools/eigen-dev -G 'Unix Makefiles')
-    make -j2
-
-# Update cnn instructions
-To sync the most recent version of `cnn`, you need to issue the following command:
- 
-    git submodule foreach git pull origin master
-    
-    
-# Command to run the parser (in allegro): 
-
-    parser/lstm-parse -h
-    
-    parser/lstm-parse -T /usr0/home/cdyer/projects/lstm-parser/train.txt -d /usr0/home/cdyer/projects/lstm-parser/dev.txt --hidden_dim 100 --lstm_input_dim 100 -w /usr3/home/lingwang/chris/sskip.100.vectors --pretrained_dim 100 --rel_dim 20 --action_dim 20 -t -P
-    
-# How to get the arc-std oracles (traning set and dev set of the parser) having a CoNLL 2006 file:
-   
-    java -jar ParserOracleArcStd.jar -t -1 -l 1 -c train10.conll -i train10.conll > oracleTrainArcStd.txt
-    (oracle code is in: /usr2/home/miguel/ParserOracle)
-    (the train10.conll file should be fully projective)
-    
-
-
+# What to cite?
+[One Parser, Many Languages](http://arxiv.org/abs/1602.01595)
+Waleed Ammar, George Mulcaire, Miguel Ballesteros, Chris Dyer, Noah A. Smith
+arXiv:1602.01595
