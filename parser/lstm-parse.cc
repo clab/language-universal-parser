@@ -150,7 +150,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     ("lstm_input_dim", po::value<unsigned>()->default_value(60), "LSTM input dimension")
     // TRAINING VS. DECODING PARAMETERS
     ("train,t", "Should training be run?")
-    ("model,m", po::value<string>(), "Load saved model from this file")
+    ("parsing_model,m", po::value<string>(), "Load saved parsing_model from this file")
+    ("tagging_model", po::value<string>(), "Load saved tagging_model from this file")
     ("server", "Should run the parser as a server which reads input sentences from STDIN and writes the predictiosn to STDOUT?")
     // DROPOUT PARAMETERS
     ("dropout", po::value<double>()->default_value(0.0),
@@ -186,7 +187,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
       1 = singletons become UNK with probability unk_prob")
     ("unk_prob,u", po::value<double>()->default_value(0.2), "Probably with which to replace "
      "singletons with UNK in training data")
-    ("score_file", po::value<string>(), "Write the model UAS score to this file")
+    ("score_file", po::value<string>(), "Write the parsing_model UAS score to this file")
     // HELP
     ("help,h", "Help");
   po::options_description dcmdline_options;
@@ -203,6 +204,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
 }
 
 struct ParserBuilder {
+  LSTMBuilder tagging_forward_lstm, tagging_backward_lstm;
   LSTMBuilder stack_lstm; // (layers, input, hidden, trainer)
   LSTMBuilder buffer_lstm;
   LSTMBuilder action_lstm;
@@ -223,18 +225,22 @@ struct ParserBuilder {
   Parameters* p_D = 0; // dependency matrix for composition function
   Parameters* p_R = 0; // relation matrix for composition function
   Parameters* p_word2l = 0; // lookup word embedding to LSTM input
+  Parameters* p_tagging_word2l = 0; // lookup word embedding to the tagging bidirectional LSTM input
   Parameters* p_spell2l = 0; // character-based spell embedding to LSTM input
   Parameters* p_p2l = 0; // POS to LSTM input
   Parameters* p_coarse_p2l = 0; // coarse POS to LSTM input
   Parameters* p_pos2state = 0; // POS to parser state
   Parameters* p_t2l = 0; // pretrained word embeddings to LSTM input
+  Parameters* p_tagging_t2l = 0; // pretrained word embeddings to the tagging bidirectional LSTM input
   Parameters* p_brown2l = 0; // Brown cluster embedding to LSTM input
   Parameters* p_brown22l = 0; // Brown cluster embedding to LSTM input
   Parameters* p_compressed_typology_to_lstm_input = 0; // compressed typology to LSTM input
+  Parameters* p_tagging_compressed_typology_to_lstm_input = 0; // compressed typology to LSTM input (for the POS tagger)
   Parameters* p_observed_to_compressed_typology = 0; // from the binary observed typology vector to the hidden compressed typology embedding
   Parameters* p_ib = 0; // LSTM input bias
   Parameters* p_cbias = 0; // composition function bias
   Parameters* p_p2a = 0;   // parser state to action
+  Parameters* p_tagging_bi2pos = 0; // bidirectional LSTM to POS
   Parameters* p_action_start = 0;  // action bias
   Parameters* p_abias = 0;  // action bias
   Parameters* p_buffer_guard = 0;  // end of buffer
@@ -243,80 +249,87 @@ struct ParserBuilder {
   Parameters* p_start_of_word = 0;// -->dummy <s> symbol
   Parameters* p_end_of_word = 0; // --> dummy </s> symbol
   LookupParameters* p_char_emb = 0; // --> mapping of characters to vectors 
-
+  
   Parameters* p_pretrained_unk = 0;
 
   LSTMBuilder fw_char_lstm;
   LSTMBuilder bw_char_lstm;
 
-  explicit ParserBuilder(Model* model) :
-    stack_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, model),
-    buffer_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, model),
-    action_lstm(LAYERS, ACTION_DIM + COMPRESSED_TYPOLOGY_DIM, HIDDEN_DIM, model),
-    p_w(model->add_lookup_parameters(VOCAB_SIZE, Dim({INPUT_DIM, 1}))),
-    p_a(model->add_lookup_parameters(ACTION_SIZE, Dim({ACTION_DIM, 1}))),
-    p_r(model->add_lookup_parameters(ACTION_SIZE, Dim({REL_DIM, 1}))),
-    p_pbias(model->add_parameters(Dim({HIDDEN_DIM, 1}))),
-    p_A(model->add_parameters(Dim({HIDDEN_DIM, HIDDEN_DIM}))),
-    p_B(model->add_parameters(Dim({HIDDEN_DIM, HIDDEN_DIM}))),
-    p_S(model->add_parameters(Dim({HIDDEN_DIM, HIDDEN_DIM}))),
-    p_H(model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_INPUT_DIM}))),
-    p_D(model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_INPUT_DIM}))),
-    p_R(model->add_parameters(Dim({LSTM_INPUT_DIM, REL_DIM}))),
-    p_word2l(model->add_parameters(Dim({LSTM_INPUT_DIM, INPUT_DIM}))),
-    p_spell2l(model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM}))),
-    p_ib(model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
-    p_cbias(model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
-    p_p2a(model->add_parameters(Dim({ACTION_SIZE, HIDDEN_DIM}))),
-    p_action_start(model->add_parameters(Dim({ACTION_DIM, 1}))),
-    p_abias(model->add_parameters(Dim({ACTION_SIZE, 1}))),
+  explicit ParserBuilder(Model* parsing_model) :
+  tagging_forward_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, parsing_model),
+  tagging_backward_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, parsing_model),
+    stack_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, parsing_model),
+    buffer_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, parsing_model),
+    action_lstm(LAYERS, ACTION_DIM + COMPRESSED_TYPOLOGY_DIM, HIDDEN_DIM, parsing_model),
+    p_w(parsing_model->add_lookup_parameters(VOCAB_SIZE, Dim({INPUT_DIM, 1}))),
+    p_a(parsing_model->add_lookup_parameters(ACTION_SIZE, Dim({ACTION_DIM, 1}))),
+    p_r(parsing_model->add_lookup_parameters(ACTION_SIZE, Dim({REL_DIM, 1}))),
+    p_pbias(parsing_model->add_parameters(Dim({HIDDEN_DIM, 1}))),
+    p_A(parsing_model->add_parameters(Dim({HIDDEN_DIM, HIDDEN_DIM}))),
+    p_B(parsing_model->add_parameters(Dim({HIDDEN_DIM, HIDDEN_DIM}))),
+    p_S(parsing_model->add_parameters(Dim({HIDDEN_DIM, HIDDEN_DIM}))),
+    p_H(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_INPUT_DIM}))),
+    p_D(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_INPUT_DIM}))),
+    p_R(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, REL_DIM}))),
+    p_word2l(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, INPUT_DIM}))),
+  p_tagging_word2l(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, INPUT_DIM}))),
+    p_spell2l(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM}))),
+    p_ib(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+    p_cbias(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+    p_p2a(parsing_model->add_parameters(Dim({ACTION_SIZE, HIDDEN_DIM}))),
+  p_tagging_bi2pos(parsing_model->add_parameters(Dim({POS_SIZE, 2 * HIDDEN_DIM}))),
+    p_action_start(parsing_model->add_parameters(Dim({ACTION_DIM, 1}))),
+    p_abias(parsing_model->add_parameters(Dim({ACTION_SIZE, 1}))),
 
-    p_buffer_guard(model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
-    p_stack_guard(model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+    p_buffer_guard(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+    p_stack_guard(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
 
-    p_start_of_word(model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
-    p_end_of_word(model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))), 
+    p_start_of_word(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+    p_end_of_word(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))), 
 
-    fw_char_lstm(LAYERS, LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM/2, model),
-    bw_char_lstm(LAYERS, LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM/2, model) {
+    fw_char_lstm(LAYERS, LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM/2, parsing_model),
+    bw_char_lstm(LAYERS, LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM/2, parsing_model) {
     
     if (USE_POS) {
-      p_p = model->add_lookup_parameters(POS_SIZE, Dim({POS_DIM, 1}));
-      p_p2l = model->add_parameters(Dim({LSTM_INPUT_DIM, POS_DIM}));
-      p_coarse_p2l = model->add_parameters(Dim({LSTM_INPUT_DIM, POS_DIM}));
+      p_p = parsing_model->add_lookup_parameters(POS_SIZE, Dim({POS_DIM, 1}));
+      p_p2l = parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, POS_DIM}));
+      p_coarse_p2l = parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, POS_DIM}));
 
       // use pos of the stack back as input to parser state
       // TODO(wammar): clean this mess
-      p_pos2state = nullptr; // model->add_parameters(Dim(HIDDEN_DIM, POS_DIM));
+      p_pos2state = nullptr; // parsing_model->add_parameters(Dim(HIDDEN_DIM, POS_DIM));
     }
 
     if (corpus.brown_clusters.size() > 0) {
-      p_brown_embeddings = model->add_lookup_parameters(BROWN_CLUSTERS_COUNT, Dim({BROWN_DIM, 1}));
-      p_brown2l = model->add_parameters(Dim({LSTM_INPUT_DIM, BROWN_DIM}));
+      p_brown_embeddings = parsing_model->add_lookup_parameters(BROWN_CLUSTERS_COUNT, Dim({BROWN_DIM, 1}));
+      p_brown2l = parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, BROWN_DIM}));
     }
   
     if (corpus.brown2_clusters.size() > 0) {
-      p_brown2_embeddings = model->add_lookup_parameters(BROWN2_CLUSTERS_COUNT, Dim({BROWN2_DIM, 1}));
-      p_brown22l = model->add_parameters(Dim({LSTM_INPUT_DIM, BROWN2_DIM}));
+      p_brown2_embeddings = parsing_model->add_lookup_parameters(BROWN2_CLUSTERS_COUNT, Dim({BROWN2_DIM, 1}));
+      p_brown22l = parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, BROWN2_DIM}));
     }
 
     if (corpus.pretrained.size() > 0) {
-      p_t = model->add_lookup_parameters(VOCAB_SIZE, Dim({PRETRAINED_DIM, 1}));
+      p_t = parsing_model->add_lookup_parameters(VOCAB_SIZE, Dim({PRETRAINED_DIM, 1}));
       for (auto it : corpus.pretrained)
         p_t->Initialize(it.first, it.second);
-      p_t2l = model->add_parameters(Dim({LSTM_INPUT_DIM, PRETRAINED_DIM}));
-      p_pretrained_unk = model->add_parameters(Dim({PRETRAINED_DIM, 1}));
+      p_t2l = parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, PRETRAINED_DIM}));
+      p_tagging_t2l = parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, PRETRAINED_DIM}));
+      p_pretrained_unk = parsing_model->add_parameters(Dim({PRETRAINED_DIM, 1}));
     } else {
       p_t = nullptr;
       p_t2l = nullptr;
+      p_tagging_t2l = nullptr;
     }
     
-    p_char_emb = model->add_lookup_parameters(CHAR_SIZE, Dim({LSTM_INPUT_DIM, 1}));
+    p_char_emb = parsing_model->add_lookup_parameters(CHAR_SIZE, Dim({LSTM_INPUT_DIM, 1}));
     
     if (TYPOLOGY_MODE == TYPOLOGY_MODE_HADAMARD_LEXICAL ||
         TYPOLOGY_MODE == TYPOLOGY_MODE_LINEAR_LEXICAL ||
         TYPOLOGY_MODE == TYPOLOGY_MODE_CASCADE_LEXICAL) {
-      p_compressed_typology_to_lstm_input = model->add_parameters(Dim({LSTM_INPUT_DIM, COMPRESSED_TYPOLOGY_DIM}));
+      p_compressed_typology_to_lstm_input = parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, COMPRESSED_TYPOLOGY_DIM}));
+      p_tagging_compressed_typology_to_lstm_input = parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, COMPRESSED_TYPOLOGY_DIM}));
     }
     
     // load typological properties (p_observed_typology) 
@@ -324,13 +337,13 @@ struct ParserBuilder {
     if (corpus.typological_properties_map.size() > 0) {
       // one element is reserved for UNK.
       unsigned languages_count = corpus.typological_properties_map.size() + 1;
-      p_observed_typology = model->add_lookup_parameters(languages_count, Dim({OBSERVED_TYPOLOGY_DIM, 1}));
+      p_observed_typology = parsing_model->add_lookup_parameters(languages_count, Dim({OBSERVED_TYPOLOGY_DIM, 1}));
       for (auto it : corpus.typological_properties_map) {
         p_observed_typology->Initialize(it.first, it.second);
       }
       
-      p_compressed_typology_to_parser_state = model->add_parameters(Dim({HIDDEN_DIM, COMPRESSED_TYPOLOGY_DIM}));
-      p_observed_to_compressed_typology = model->add_parameters(Dim({COMPRESSED_TYPOLOGY_DIM, OBSERVED_TYPOLOGY_DIM}));
+      p_compressed_typology_to_parser_state = parsing_model->add_parameters(Dim({HIDDEN_DIM, COMPRESSED_TYPOLOGY_DIM}));
+      p_observed_to_compressed_typology = parsing_model->add_parameters(Dim({COMPRESSED_TYPOLOGY_DIM, OBSERVED_TYPOLOGY_DIM}));
       
       cerr << "p_observed_typology was " << p_observed_typology << endl << endl;
     } else {
@@ -341,6 +354,8 @@ struct ParserBuilder {
       cerr << "p_observed_typology was (null): " << p_observed_typology << endl << endl;
     }
   }
+
+  // TODO(wammar): continue developing POS predictions here.
 
   static bool IsActionForbidden(const string& a, unsigned bsize, unsigned ssize, vector<int> stacki) {
     if (a[1]=='W' && ssize<3) return true;
@@ -1319,24 +1334,24 @@ int main(int argc, char** argv) {
   cerr << "Number of UTF8 chars: " << corpus.maxChars << endl;
   
   // Initialize the parser.
-  Model model;
-  ParserBuilder parser(&model);
-  if (conf.count("model")) {
-    cerr << "reading the model from " << conf["model"].as<string>().c_str() << "...";
-    ifstream in(conf["model"].as<string>().c_str());
+  Model parsing_model;
+  ParserBuilder parser(&parsing_model);
+  if (conf.count("parsing_model")) {
+    cerr << "reading the parsing_model from " << conf["parsing_model"].as<string>().c_str() << "...";
+    ifstream in(conf["parsing_model"].as<string>().c_str());
     boost::archive::text_iarchive ia(in);
-    ia >> model;
+    ia >> parsing_model;
     cerr << "done." << endl;
   }
 
-  // we are only allowed to read the dev data after initializing the model
+  // we are only allowed to read the dev data after initializing the parsing_model
   corpus.load_correct_actionsDev(conf["dev_data"].as<string>());
   
   // TRAINING
   if (conf.count("train")) {
     signal(SIGINT, signal_callback_handler);
-    SimpleSGDTrainer adam(&model);
-    //AdamTrainer adam(&model);
+    SimpleSGDTrainer adam(&parsing_model);
+    //AdamTrainer adam(&parsing_model);
     adam.eta_decay = 0.08;
     cerr << "Training started."<<"\n";
     vector<unsigned> order(corpus.sentences_count);
@@ -1414,7 +1429,7 @@ int main(int argc, char** argv) {
           int sent_id = order_per_lang_iter.second[si % order_per_lang_iter.second.size()];
           vector<TokenInfo>& sentence = corpus.sentences[sent_id];
           
-          // Mark some singletons as OOVs while training so that the model knows how to deal with real OOVs in the dev set.
+          // Mark some singletons as OOVs while training so that the parsing_model knows how to deal with real OOVs in the dev set.
           // This overrides the property TokenInfo.training_oov of tokens in the training treebank.
           if (unk_strategy == 1) {
             for (auto &tokenInfo : sentence) {
@@ -1438,11 +1453,11 @@ int main(int argc, char** argv) {
           trs += actions.size();
         }
         
-        double gradient_l2_norm = model.gradient_l2_norm();
+        double gradient_l2_norm = parsing_model.gradient_l2_norm();
         //cerr << "gradient_l2_norm =" << gradient_l2_norm << endl;
         if (std::isnan(gradient_l2_norm)) {
           cerr << "WARNING: gradient_l2_norm is nan. there's a bug somewhere in CNN which gave rise to this. As a workaround, I'm going to reset the gradient." << endl;
-          model.reset_gradient();
+          parsing_model.reset_gradient();
         }
         sum_of_gradient_norms += gradient_l2_norm;
         adam.update(1.0);
@@ -1508,8 +1523,8 @@ int main(int argc, char** argv) {
           best_correct_heads = correct_heads;
           ofstream out(fname);
           boost::archive::text_oarchive oa(out);
-          oa << model;
-          // Create a soft link to the most recent model in order to make it
+          oa << parsing_model;
+          // Create a soft link to the most recent parsing_model in order to make it
           // easier to refer to it in a shell script.
           if (!softlinkCreated) {
             string softlink = " latest_model";
@@ -1521,7 +1536,7 @@ int main(int argc, char** argv) {
             softlinkCreated = true;
           }
 	  out.close();
-	  // write the model's UAS performance to file
+	  // write the parsing_model's UAS performance to file
 	  if (SCORE_FILENAME != "") {
 	    ofstream score_file(SCORE_FILENAME);
 	    score_file << (correct_heads / total_heads);
@@ -1531,11 +1546,11 @@ int main(int argc, char** argv) {
       }
     }
 
-    // reload the best model
-    cerr << "reloading the best model from file latest_model...";
+    // reload the best parsing_model
+    cerr << "reloading the best parsing_model from file latest_model...";
     ifstream in("latest_model");
     boost::archive::text_iarchive ia(in);
-    ia >> model;
+    ia >> parsing_model;
     cerr << "done." << endl;
     
   } // should do training?
