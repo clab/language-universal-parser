@@ -151,7 +151,6 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     // TRAINING VS. DECODING PARAMETERS
     ("train,t", "Should training be run?")
     ("parsing_model,m", po::value<string>(), "Load saved parsing_model from this file")
-    ("tagging_model", po::value<string>(), "Load saved tagging_model from this file")
     ("server", "Should run the parser as a server which reads input sentences from STDIN and writes the predictiosn to STDOUT?")
     // DROPOUT PARAMETERS
     ("dropout", po::value<double>()->default_value(0.0),
@@ -209,13 +208,16 @@ struct ParserBuilder {
   LSTMBuilder buffer_lstm;
   LSTMBuilder action_lstm;
   LookupParameters* p_w = 0; // word embeddings
+  LookupParameters* p_tagging_w = 0; // word embeddings (for tagger)
   LookupParameters* p_t = 0; // pretrained word embeddings (not updated)
   LookupParameters* p_observed_typology = 0; // typological properties (not updated)
   LookupParameters* p_a = 0; // input action embeddings
   LookupParameters* p_r = 0; // relation embeddings
   LookupParameters* p_p = 0; // pos tag embeddings
   LookupParameters* p_brown_embeddings = 0; // brown cluster embeddings
-  LookupParameters* p_brown2_embeddings = 0; // brown cluster embeddings
+  LookupParameters* p_brown2_embeddings = 0; // brown2 cluster embeddings
+  LookupParameters* p_tagging_brown_embeddings = 0; // brown cluster embeddings (tagger)
+  LookupParameters* p_tagging_brown2_embeddings = 0; // brown2 cluster embeddings (tagger)
   Parameters* p_pbias = 0; // parser state bias
   Parameters* p_A = 0; // action lstm to parser state
   Parameters* p_B = 0; // buffer lstm to parser state
@@ -233,14 +235,20 @@ struct ParserBuilder {
   Parameters* p_t2l = 0; // pretrained word embeddings to LSTM input
   Parameters* p_tagging_t2l = 0; // pretrained word embeddings to the tagging bidirectional LSTM input
   Parameters* p_brown2l = 0; // Brown cluster embedding to LSTM input
-  Parameters* p_brown22l = 0; // Brown cluster embedding to LSTM input
+  Parameters* p_brown22l = 0; // Brown2 cluster embedding to LSTM input
+  Parameters* p_tagging_brown2l = 0; // Brown cluster embedding to LSTM input (tagger)
+  Parameters* p_tagging_brown22l = 0; // Brown2 cluster embedding to LSTM input (tagger)
   Parameters* p_compressed_typology_to_lstm_input = 0; // compressed typology to LSTM input
   Parameters* p_tagging_compressed_typology_to_lstm_input = 0; // compressed typology to LSTM input (for the POS tagger)
   Parameters* p_observed_to_compressed_typology = 0; // from the binary observed typology vector to the hidden compressed typology embedding
   Parameters* p_ib = 0; // LSTM input bias
+  Parameters* p_tagging_ib = 0; // LSTM input bias (for the tagger)
+  Parameters* p_tagging_sos = 0; // token representation of the initial input to the forward LSTM used for tagging 
+  Parameters* p_tagging_eos = 0; // token representation of the initial input to the backward LSTM used for tagging
   Parameters* p_cbias = 0; // composition function bias
   Parameters* p_p2a = 0;   // parser state to action
-  Parameters* p_tagging_bi2pos = 0; // bidirectional LSTM to POS
+  Parameters* p_tagging_bi2pos = 0; // bidirectional LSTM to POS (tagger)
+  Parameters* p_tagging_pos_bias = 0;  // pos bias (tagger)
   Parameters* p_action_start = 0;  // action bias
   Parameters* p_abias = 0;  // action bias
   Parameters* p_buffer_guard = 0;  // end of buffer
@@ -262,6 +270,7 @@ struct ParserBuilder {
     buffer_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, parsing_model),
     action_lstm(LAYERS, ACTION_DIM + COMPRESSED_TYPOLOGY_DIM, HIDDEN_DIM, parsing_model),
     p_w(parsing_model->add_lookup_parameters(VOCAB_SIZE, Dim({INPUT_DIM, 1}))),
+  p_tagging_w(parsing_model->add_lookup_parameters(VOCAB_SIZE, Dim({INPUT_DIM, 1}))),
     p_a(parsing_model->add_lookup_parameters(ACTION_SIZE, Dim({ACTION_DIM, 1}))),
     p_r(parsing_model->add_lookup_parameters(ACTION_SIZE, Dim({REL_DIM, 1}))),
     p_pbias(parsing_model->add_parameters(Dim({HIDDEN_DIM, 1}))),
@@ -275,9 +284,13 @@ struct ParserBuilder {
   p_tagging_word2l(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, INPUT_DIM}))),
     p_spell2l(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM}))),
     p_ib(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+  p_tagging_ib(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+  p_tagging_sos(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+  p_tagging_eos(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
     p_cbias(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
     p_p2a(parsing_model->add_parameters(Dim({ACTION_SIZE, HIDDEN_DIM}))),
   p_tagging_bi2pos(parsing_model->add_parameters(Dim({POS_SIZE, 2 * HIDDEN_DIM}))),
+  p_tagging_pos_bias(parsing_model->add_parameters(Dim({POS_SIZE, 1}))),
     p_action_start(parsing_model->add_parameters(Dim({ACTION_DIM, 1}))),
     p_abias(parsing_model->add_parameters(Dim({ACTION_SIZE, 1}))),
 
@@ -301,13 +314,21 @@ struct ParserBuilder {
     }
 
     if (corpus.brown_clusters.size() > 0) {
+      // parser
       p_brown_embeddings = parsing_model->add_lookup_parameters(BROWN_CLUSTERS_COUNT, Dim({BROWN_DIM, 1}));
       p_brown2l = parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, BROWN_DIM}));
+      // tagger
+      p_tagging_brown_embeddings = parsing_model->add_lookup_parameters(BROWN_CLUSTERS_COUNT, Dim({BROWN_DIM, 1}));
+      p_tagging_brown2l = parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, BROWN_DIM}));
     }
   
     if (corpus.brown2_clusters.size() > 0) {
+      // parser
       p_brown2_embeddings = parsing_model->add_lookup_parameters(BROWN2_CLUSTERS_COUNT, Dim({BROWN2_DIM, 1}));
       p_brown22l = parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, BROWN2_DIM}));
+      // tagger
+      p_tagging_brown2_embeddings = parsing_model->add_lookup_parameters(BROWN2_CLUSTERS_COUNT, Dim({BROWN2_DIM, 1}));
+      p_tagging_brown22l = parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, BROWN2_DIM}));
     }
 
     if (corpus.pretrained.size() > 0) {
@@ -354,8 +375,6 @@ struct ParserBuilder {
       cerr << "p_observed_typology was (null): " << p_observed_typology << endl << endl;
     }
   }
-
-  // TODO(wammar): continue developing POS predictions here.
 
   static bool IsActionForbidden(const string& a, unsigned bsize, unsigned ssize, vector<int> stacki) {
     if (a[1]=='W' && ssize<3) return true;
@@ -445,6 +464,215 @@ struct ParserBuilder {
     else return 0;
   }
 
+  // if build_training_graph == false, this runs greedy decoding
+  // the chosen tags are inserted into the "results" vector (in training just returns the reference)
+  void log_prob_tagger(ComputationGraph& hg,
+		       vector<TokenInfo>& sent,
+		       const vector<unsigned>& pos_tag_set,
+		       double *right,
+		       bool build_training_graph) {
+    // Initialize the bidirectional LSTM.
+    tagging_forward_lstm.new_graph(hg);
+    tagging_backward_lstm.new_graph(hg);
+    tagging_forward_lstm.start_new_sequence();
+    tagging_backward_lstm.start_new_sequence();
+
+    // variables in the computation graph representing parameters
+    Expression pretrained_unk;
+    if (corpus.pretrained.size() > 0) {
+      pretrained_unk = parameter(hg, p_pretrained_unk);
+    }
+    Expression compressed_typology_to_parser_state, observed_to_compressed_typology;
+    if (corpus.typological_properties_map.size() > 0) {
+      compressed_typology_to_parser_state = parameter(hg, p_compressed_typology_to_parser_state);
+      observed_to_compressed_typology = parameter(hg, p_observed_to_compressed_typology);
+    }
+    Expression tagging_word2l = parameter(hg, p_tagging_word2l);
+    Expression tagging_t2l;
+    if (corpus.pretrained.size() > 0) {
+      tagging_t2l = parameter(hg, p_tagging_t2l);
+    }
+    Expression tagging_compressed_typology_to_lstm_input;
+    Expression compressed_typology;
+    if (TYPOLOGY_MODE == TYPOLOGY_MODE_HADAMARD_LEXICAL ||
+        TYPOLOGY_MODE == TYPOLOGY_MODE_LINEAR_LEXICAL ||
+        TYPOLOGY_MODE == TYPOLOGY_MODE_CASCADE_LEXICAL) {
+      tagging_compressed_typology_to_lstm_input = parameter(hg, p_tagging_compressed_typology_to_lstm_input);
+      // .. also use the compressed typological embedding
+      Expression observed_typology = const_lookup(hg, p_observed_typology, sent[0].lang_id);
+      vector<float> observed_typology_vector = as_vector(hg.incremental_forward());
+      compressed_typology = tanh(observed_to_compressed_typology * observed_typology);
+      if (build_training_graph && BLOCK_DROPOUT_TYPOLOGY_EMBEDDING > 0.0) {
+	compressed_typology = block_dropout(compressed_typology, BLOCK_DROPOUT_TYPOLOGY_EMBEDDING);
+      }
+    } else {
+      vector<float> zeros(COMPRESSED_TYPOLOGY_DIM, 0.0);  // set x_values to change the inputs to the network
+      compressed_typology = input(hg, {COMPRESSED_TYPOLOGY_DIM}, &zeros);
+    }
+    // layer between bidirecationl lstm and output layer
+    Expression tagging_pos_bias = parameter(hg, p_tagging_pos_bias); // bias
+    Expression tagging_bi2pos = parameter(hg, p_tagging_bi2pos); // weight matrix
+    // bias for the token representation
+    Expression tagging_ib = parameter(hg, p_tagging_ib);
+    // start of sentence and end of sentence token representations
+    Expression tagging_sos = parameter(hg, p_tagging_sos);
+    Expression tagging_eos = parameter(hg, p_tagging_eos);
+    // brown to input
+    Expression tagging_brown2l;
+    Expression tagging_brown22l;
+    if (p_tagging_brown2l) { tagging_brown2l = parameter(hg, p_tagging_brown2l); }
+    if (p_tagging_brown22l) { tagging_brown22l = parameter(hg, p_tagging_brown22l); }
+
+    hg.incremental_forward();
+
+    // compute token embeddings, which will be used as input to the bidirectional LSTM
+    vector<Expression> token_embeddings(sent.size());
+    for (unsigned i = 0; i < sent.size(); ++i) {
+    
+      // initialize the embedding of this token with bias parameters
+      Expression i_i = tagging_ib;
+
+      // .. add the (learned) word embedding
+      Expression word_embedding;
+      if (sent[i].training_oov) {
+        // OOV words are replaced with a special UNK symbol.
+        word_embedding = lookup(hg, p_tagging_w, kUNK_SYMBOL);
+      } else {
+        // lookup the learned embedding of a regular word.
+        assert(sent[i].word_id < VOCAB_SIZE);
+        word_embedding = lookup(hg, p_tagging_w, sent[i].word_id);
+      }
+      if (build_training_graph || BLOCK_DROPOUT_WORD_EMBEDDING == 0.0) {
+        word_embedding = block_dropout(word_embedding, BLOCK_DROPOUT_WORD_EMBEDDING);
+      } else if (!build_training_graph && BLOCK_DROPOUT_WORD_EMBEDDING == 1.0) {
+        word_embedding = 0.0 * word_embedding;
+      }
+      i_i = affine_transform({i_i, tagging_word2l, word_embedding});
+
+      // .. also use brown cluster embeddings
+      if (corpus.brown_clusters.size() > 0) {
+        // by default, assign the unkown brown cluster id, then update it if this word actually appears in the brown clusters file
+        unsigned brown_cluster_id = corpus.brown_clusters[kUNK_BROWN];
+        if (corpus.brown_clusters.count(sent[i].word_id) > 0) {
+          brown_cluster_id = corpus.brown_clusters[sent[i].word_id];
+        }
+        // lookup the embedding of this brown cluster id
+        Expression brown_embedding = lookup(hg, p_tagging_brown_embeddings, brown_cluster_id);
+        i_i = affine_transform({i_i, tagging_brown2l, brown_embedding});
+      }
+
+      // .. also use brown2 cluster embeddings
+      if (corpus.brown2_clusters.size() > 0) {
+        // by default, assign the unkown brown cluster id, then update it if this word actually appears in the brown clusters file
+        unsigned brown2_cluster_id = corpus.brown2_clusters[kUNK_BROWN];
+        if (corpus.brown2_clusters.count(sent[i].word_id) > 0) {
+          brown2_cluster_id = corpus.brown2_clusters[sent[i].word_id];
+        }
+        // lookup the embedding of this brown cluster id
+        Expression brown2_embedding = lookup(hg, p_tagging_brown2_embeddings, brown2_cluster_id);
+        i_i = affine_transform({i_i, tagging_brown22l, brown2_embedding});
+      }
+
+      // .. also use (pretrained) word embeddings if available
+      if (p_t) {
+        Expression t;
+        if (corpus.pretrained.count(sent[i].word_id) != 0) {
+          t = const_lookup(hg, p_t, sent[i].word_id);
+        } else {
+          t = pretrained_unk;
+        }
+        if (build_training_graph || BLOCK_DROPOUT_PRETRAINED_EMBEDDING == 0.0) {
+          t = block_dropout(t, BLOCK_DROPOUT_PRETRAINED_EMBEDDING);
+        } else if (!build_training_graph && BLOCK_DROPOUT_PRETRAINED_EMBEDDING == 1.0) {
+          t = 0.0 * t;
+        }
+        i_i = affine_transform({i_i, tagging_t2l, t});
+      }
+
+      // .. also use the compressed typological embedding
+      if (TYPOLOGY_MODE == TYPOLOGY_MODE_HADAMARD_LEXICAL ||
+          TYPOLOGY_MODE == TYPOLOGY_MODE_LINEAR_LEXICAL ||
+          TYPOLOGY_MODE == TYPOLOGY_MODE_CASCADE_LEXICAL) {
+        Expression dropped_out_compressed_typology;
+        if (build_training_graph || BLOCK_DROPOUT_TYPOLOGY_EMBEDDING == 0.0) {
+          dropped_out_compressed_typology = block_dropout(compressed_typology, BLOCK_DROPOUT_TYPOLOGY_EMBEDDING);
+        } else if (!build_training_graph && BLOCK_DROPOUT_TYPOLOGY_EMBEDDING == 1.0) {
+          dropped_out_compressed_typology = 0.0 * compressed_typology;
+        }
+        i_i = affine_transform({i_i, tagging_compressed_typology_to_lstm_input, dropped_out_compressed_typology});
+      }
+      
+      // .. nonlinearity
+      i_i = tanh(i_i);
+
+      // .. dropout at training time only
+      if (build_training_graph) {
+        i_i = dropout(i_i, DROPOUT);
+      }
+
+      // token representation is complete
+      token_embeddings[i] = i_i;
+    }
+
+    // compute bidirectional lstm states
+    tagging_forward_lstm.add_input(tagging_sos);
+    tagging_backward_lstm.add_input(tagging_eos);
+    vector<Expression> forward_lstm_outputs;
+    vector<Expression> backward_lstm_outputs;
+    for (unsigned i = 0; i < sent.size(); ++i) {
+      // compute next forward output (represents token i)
+      tagging_forward_lstm.add_input(token_embeddings[i]);
+      forward_lstm_outputs.push_back(tagging_forward_lstm.back());
+      // compute next backward output (represnets token |sent|-1-i)
+      tagging_backward_lstm.add_input(token_embeddings[sent.size()-1-i]);
+      backward_lstm_outputs.push_back(tagging_backward_lstm.back());
+    }
+    // reverse outputs of the backward lstm
+    std::reverse(std::begin(backward_lstm_outputs), std::end(backward_lstm_outputs));
+    
+    // learn/decode next POS tag
+    vector<Expression> negative_log_probs;
+    for (unsigned i = 0; i < sent.size(); ++i) {
+
+      // pos_scores = tagging_pos_bias + tagging_bi2pos * bi_lstm_output
+      Expression bi_lstm_output = concatenate({forward_lstm_outputs[i], backward_lstm_outputs[i]});
+      Expression pos_scores = affine_transform({tagging_pos_bias, tagging_bi2pos, bi_lstm_output});
+      Expression pos_log_probs = log_softmax(pos_scores);
+      vector<float> pos_log_probs_vector = as_vector(hg.incremental_forward());
+
+      // predict
+      unsigned most_likely_pos_id = 0;
+      for (unsigned i = 1; i < pos_log_probs_vector.size(); ++i) {
+	if (corpus.coarse_pos_vocab.count(i) == 0) { continue; }
+	if (corpus.coarse_pos_vocab.count(most_likely_pos_id) == 0 || pos_log_probs_vector[i] > pos_log_probs_vector[most_likely_pos_id]) {
+	  most_likely_pos_id = i;
+	}
+      }
+      sent[i].predicted_coarse_pos_id = most_likely_pos_id;
+      if (build_training_graph && most_likely_pos_id == sent[i].coarse_pos_id) { (*right)++; }
+
+      // learn
+      if (build_training_graph) {
+	Expression negative_log_prob = -pick(pos_log_probs, most_likely_pos_id);
+	negative_log_probs.push_back(negative_log_prob);
+      }
+
+      // report bug
+      for (auto nonpositive : pos_log_probs_vector) { 
+	if (nonpositive >= 0.01) { 
+	  cerr << "ERROR: log_softmax = " << nonpositive << endl; 
+	  assert(nonpositive <= 0.01); 
+	} 
+      }
+      hg.incremental_forward();
+    }
+
+    // final cost for this sentence.
+    Expression tot_neglogprob = sum(negative_log_probs);
+    assert(tot_neglogprob.pg != nullptr);
+    cerr << "tot_neglogprob = " << hg.incremental_forward() << endl;
+  }
+
   // *** if correct_actions is empty, this runs greedy decoding ***
   // the chosen parse actions are inserted into the "results" vector (in training just returns the reference)
   void log_prob_parser(ComputationGraph& hg,
@@ -494,8 +722,6 @@ struct ParserBuilder {
       p2l = parameter(hg, p_p2l);
       coarse_p2l = parameter(hg, p_coarse_p2l);
     }
-    // TODO(wammar): clean this mess
-    //Expression pos2state = parameter(hg, p_pos2state);
     Expression t2l;
     if (p_t2l) { t2l = parameter(hg, p_t2l); }
     Expression brown2l;
@@ -514,15 +740,12 @@ struct ParserBuilder {
         TYPOLOGY_MODE == TYPOLOGY_MODE_LINEAR_LEXICAL ||
         TYPOLOGY_MODE == TYPOLOGY_MODE_CASCADE_LEXICAL) {
       // .. also use the compressed typological embedding
-      assert(sent.size() > 0);
-      //cerr << "sent[0].lang_id was " << sent[0].lang_id << endl << endl;
       Expression observed_typology = const_lookup(hg, p_observed_typology, sent[0].lang_id);
       vector<float> observed_typology_vector = as_vector(hg.incremental_forward());
       compressed_typology = tanh(observed_to_compressed_typology * observed_typology);
       if (build_training_graph && BLOCK_DROPOUT_TYPOLOGY_EMBEDDING > 0.0) {
 	compressed_typology = block_dropout(compressed_typology, BLOCK_DROPOUT_TYPOLOGY_EMBEDDING);
       }
-      hg.incremental_forward();
       // TODO(wammar): visualize the language embeddings here
       //vector<float> compressed_typology_vector = as_vector(hg.incremental_forward());
       //cerr << "compressed_typology_vector = "; 
@@ -533,15 +756,15 @@ struct ParserBuilder {
     } else {
       vector<float> zeros(COMPRESSED_TYPOLOGY_DIM, 0.0);  // set x_values to change the inputs to the network
       compressed_typology = input(hg, {COMPRESSED_TYPOLOGY_DIM}, &zeros);
-      hg.incremental_forward();
     }
+    hg.incremental_forward();
 
     Expression action_input = concatenate({action_start, compressed_typology});
     hg.incremental_forward();
     action_lstm.add_input(action_input);
     hg.incremental_forward();
 
-    // variables representing word embeddings (possibly including POS info)
+    // variables representing token embeddings (possibly including POS info)
     vector<Expression> buffer(sent.size() + 1);  
     // position of the words in the sentence
     vector<int> bufferi(sent.size() + 1);  
@@ -738,7 +961,7 @@ struct ParserBuilder {
       bufferi[sent.size() - i] = i;
 
     }
-    
+
     // dummy symbol to represent the empty buffer
     buffer[0] = parameter(hg, p_buffer_guard);
     bufferi[0] = -999;
@@ -953,6 +1176,8 @@ struct ParserBuilder {
         stacki.push_back(headi);
       }
     }
+    // TODO(wammar): continue copying for the tagger from here
+    
     assert(stack.size() == 2); // guard symbol, root
     assert(stacki.size() == 2);
     assert(buffer.size() == 1); // guard symbol
@@ -963,26 +1188,6 @@ struct ParserBuilder {
     assert(tot_neglogprob.pg != nullptr);
     assert(results.size() > 0);
   } // end of log_prob_parse(...)
-};
-
-struct ParserState {
-  LSTMBuilder stack_lstm;
-  LSTMBuilder buffer_lstm;
-  LSTMBuilder action_lstm;
-  vector<Expression> buffer;
-  vector<int> bufferi;
-  vector<Expression> stack;
-  vector<int> stacki;
-  vector<unsigned> results;  // sequence of predicted actions
-  bool complete;
-
-  double score;
-};
-
-struct ParserStateCompare {
-  bool operator()(const ParserState& a, const ParserState& b) const {
-    return a.score > b.score;
-  }
 };
 
 void signal_callback_handler(int /* signum */) {
