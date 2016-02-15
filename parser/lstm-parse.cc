@@ -88,6 +88,7 @@ unsigned LSTM_CHAR_OUTPUT_DIM = 2 * 50;
 bool USE_SPELLING = false;
 
 bool USE_POS = false;
+bool PREDICT_COARSE_POS = false;
 
 double DROPOUT = 0.0;
 double BLOCK_DROPOUT_WORD_EMBEDDING = 0.0;
@@ -152,6 +153,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     ("train,t", "Should training be run?")
     ("parsing_model,m", po::value<string>(), "Load saved parsing_model from this file")
     ("server", "Should run the parser as a server which reads input sentences from STDIN and writes the predictiosn to STDOUT?")
+    ("predict_coarse_pos", "Should predict coarse POS tags at decoding instead of using gold annotations.")
     // DROPOUT PARAMETERS
     ("dropout", po::value<double>()->default_value(0.0),
      "dropout coefficient for individual elements in the token embedding, "
@@ -468,7 +470,6 @@ struct ParserBuilder {
   // the chosen tags are inserted into the "results" vector (in training just returns the reference)
   void log_prob_tagger(ComputationGraph& hg,
 		       vector<TokenInfo>& sent,
-		       const vector<unsigned>& pos_tag_set,
 		       double *right,
 		       bool build_training_graph) {
     // Initialize the bidirectional LSTM.
@@ -548,7 +549,7 @@ struct ParserBuilder {
         word_embedding = 0.0 * word_embedding;
       }
       i_i = affine_transform({i_i, tagging_word2l, word_embedding});
-
+      
       // .. also use brown cluster embeddings
       if (corpus.brown_clusters.size() > 0) {
         // by default, assign the unkown brown cluster id, then update it if this word actually appears in the brown clusters file
@@ -648,12 +649,19 @@ struct ParserBuilder {
 	  most_likely_pos_id = i;
 	}
       }
-      sent[i].predicted_coarse_pos_id = most_likely_pos_id;
-      if (build_training_graph && most_likely_pos_id == sent[i].coarse_pos_id) { (*right)++; }
+      
+      // ROOT gets special treatment
+      if (i == sent.size() - 1) {
+	assert(sent[i].word_id == kROOT_SYMBOL);
+	sent[i].predicted_coarse_pos_id = sent[i].coarse_pos_id;
+      } else {
+	sent[i].predicted_coarse_pos_id = most_likely_pos_id;
+	if (build_training_graph && most_likely_pos_id == sent[i].coarse_pos_id) { (*right)++; }
+      }
 
       // learn
       if (build_training_graph) {
-	Expression negative_log_prob = -pick(pos_log_probs, most_likely_pos_id);
+	Expression negative_log_prob = -pick(pos_log_probs, sent[i].coarse_pos_id);
 	negative_log_probs.push_back(negative_log_prob);
       }
 
@@ -668,9 +676,11 @@ struct ParserBuilder {
     }
 
     // final cost for this sentence.
-    Expression tot_neglogprob = sum(negative_log_probs);
-    assert(tot_neglogprob.pg != nullptr);
-    cerr << "tot_neglogprob = " << hg.incremental_forward() << endl;
+    if (build_training_graph) {
+      Expression tot_neglogprob = sum(negative_log_probs);
+      hg.incremental_forward();
+      assert(tot_neglogprob.pg != nullptr);
+    }
   }
 
   // *** if correct_actions is empty, this runs greedy decoding ***
@@ -858,7 +868,8 @@ struct ParserBuilder {
 
 	// use coarse pos embeddings if it was observed in training
 	if (corpus.training_pos_vocab.count(tokenInfo.coarse_pos_id)) {
-	  Expression coarse_p = lookup(hg, p_p, tokenInfo.coarse_pos_id);
+	  unsigned coarse_pos_id = PREDICT_COARSE_POS? tokenInfo.predicted_coarse_pos_id : tokenInfo.coarse_pos_id;
+	  Expression coarse_p = lookup(hg, p_p, coarse_pos_id);
 	  i_i = affine_transform({i_i, coarse_p2l, coarse_p});
 	}
 	
@@ -1176,7 +1187,6 @@ struct ParserBuilder {
         stacki.push_back(headi);
       }
     }
-    // TODO(wammar): continue copying for the tagger from here
     
     assert(stack.size() == 2); // guard symbol, root
     assert(stacki.size() == 2);
@@ -1217,6 +1227,7 @@ void output_conll(const vector<TokenInfo>& sentence,
   for (unsigned i = 0; i < (sentence.size()-1); ++i) {
     auto index = i + 1;
     string wit = corpus.intToWords.at(sentence[i].word_id);
+    string coarse_pos_tag = corpus.intToPos.at(PREDICT_COARSE_POS? sentence[i].predicted_coarse_pos_id : sentence[i].coarse_pos_id);
     string pit = corpus.intToPos.at(sentence[i].pos_id);
     assert(hyp.find(i) != hyp.end());
     auto hyp_head = hyp.find(i)->second + 1;
@@ -1227,10 +1238,10 @@ void output_conll(const vector<TokenInfo>& sentence,
     size_t first_char_in_rel = hyp_rel.find('(') + 1;
     size_t last_char_in_rel = hyp_rel.rfind(')') - 1;
     hyp_rel = hyp_rel.substr(first_char_in_rel, last_char_in_rel - first_char_in_rel + 1);
-    cout << index << '\t'       // 1. ID 
-         << wit << '\t'         // 2. FORM
-         << "_" << '\t'         // 3. LEMMA 
-         << "_" << '\t'         // 4. CPOSTAG 
+    cout << index << '\t'          // 1. ID 
+         << wit << '\t'            // 2. FORM
+         << "_" << '\t'            // 3. LEMMA 
+         << coarse_pos_tag << '\t' // 4. CPOSTAG
          << pit << '\t'         // 5. POSTAG
          << "_" << '\t'         // 6. FEATS
          << hyp_head << '\t'    // 7. HEAD
@@ -1384,11 +1395,16 @@ int main(int argc, char** argv) {
 
   po::variables_map conf;
   InitCommandLine(argc, argv, &conf);
+
+  // POS configurations
   USE_POS = conf.count("use_pos_tags");
+  PREDICT_COARSE_POS = conf.count("predict_coarse_pos");
+  corpus.COARSE_ONLY = conf.count("coarse_only");
+  if (PREDICT_COARSE_POS && !corpus.COARSE_ONLY) {
+    assert("if you specify --predict_coarse_pos, you must also specify --coarse_only." && false);
+  }
 
   corpus.USE_SPELLING = USE_SPELLING = conf.count("use_spelling");
-
-  corpus.COARSE_ONLY = conf.count("coarse_only");
 
   if (conf.count("dropout")) { 
     // intialization should happen in only one place. right now, DROPOUT is initialized AND the conf parameter is defaulted.
@@ -1533,11 +1549,15 @@ int main(int argc, char** argv) {
       if (wc.second == 1) singletons.insert(wc.first);
   }
 
+  if (conf.count("predict_coarse_pos")) {
+    
+  }
+
   // Log some stats about the corpus.
   cerr << "Number of words in training vocab: " << corpus.training_vocab.size() << endl;
   cerr << "Total number of words: " << VOCAB_SIZE << endl;
   cerr << "Number of UTF8 chars: " << corpus.maxChars << endl;
-  
+
   // Initialize the parser.
   Model parsing_model;
   ParserBuilder parser(&parsing_model);
@@ -1555,9 +1575,9 @@ int main(int argc, char** argv) {
   // TRAINING
   if (conf.count("train")) {
     signal(SIGINT, signal_callback_handler);
-    SimpleSGDTrainer adam(&parsing_model);
-    //AdamTrainer adam(&parsing_model);
-    adam.eta_decay = 0.08;
+    SimpleSGDTrainer optimizer(&parsing_model);
+    //AdamTrainer optimizer(&parsing_model);
+    optimizer.eta_decay = 0.08;
     cerr << "Training started."<<"\n";
     vector<unsigned> order(corpus.sentences_count);
     unordered_map<int, vector<unsigned>> order_per_lang;
@@ -1581,13 +1601,15 @@ int main(int argc, char** argv) {
     unsigned si = min_sents_per_lang;
     cerr << "NUMBER OF TRAINING SENTENCES: " << corpus.sentences_count << endl;
     cerr << "epoch size: " << min_sents_per_lang << "(when the training data consists of multiple languages, this is the minimum number of sentences in the same language)" << endl;
-    unsigned trs = 0;
-    double right = 0;
-    double llh = 0;
+    
     double sum_of_gradient_norms = 0;
     bool first = true;
     int iter = -1;
 
+    unsigned trs = 0, tagging_trs = 0;
+    double right = 0, tagging_right = 0;
+    double llh = 0, tagging_llh = 0;
+    
     unsigned epoch_count = 0;
     while(!requested_stop) {
       ++iter;
@@ -1600,7 +1622,7 @@ int main(int argc, char** argv) {
           if (first) { 
             first = false; 
           } else { 
-            adam.update_epoch(); 
+            optimizer.update_epoch(); 
             epoch_count += 1;
           }
           if (epoch_count == EPOCHS) {
@@ -1632,30 +1654,56 @@ int main(int argc, char** argv) {
           // shuffled sentence ids. Languages which have fewer sentences repeat their
           // sentences in the same order until next shuffle.
           int sent_id = order_per_lang_iter.second[si % order_per_lang_iter.second.size()];
-          vector<TokenInfo>& sentence = corpus.sentences[sent_id];
+          vector<TokenInfo> sentence = corpus.sentences[sent_id];
           
           // Mark some singletons as OOVs while training so that the parsing_model knows how to deal with real OOVs in the dev set.
           // This overrides the property TokenInfo.training_oov of tokens in the training treebank.
           if (unk_strategy == 1) {
             for (auto &tokenInfo : sentence) {
-              tokenInfo.training_oov = (singletons.count(tokenInfo.word_id) && cnn::rand01() < unk_prob);
+	      assert(!tokenInfo.training_oov);
+	      tokenInfo.training_oov = (singletons.count(tokenInfo.word_id) && cnn::rand01() < unk_prob);
             }
           }
-          const vector<unsigned>& actions = corpus.correct_act_sent[sent_id];
 
-          vector<unsigned> dummy_actions;
-          ComputationGraph hg;
-          parser.log_prob_parser(hg, sentence, actions, corpus.actions, &right, dummy_actions);
-          double lp = as_scalar(hg.incremental_forward());
-          if (std::isnan(lp)) { 
-	    cerr << "WARNING: log_prob = nan" << endl;
-	    continue; 
+	  // use the same computation graph for both tagging and parsing
+	  //ComputationGraph hg;
+	    
+	  // compute gradient for the tagger
+	  if (PREDICT_COARSE_POS) {
+	    ComputationGraph hg;
+	    bool build_training_graph = true;
+	    parser.log_prob_tagger(hg, sentence, &tagging_right, build_training_graph);
+	    double lp = as_scalar(hg.incremental_forward());
+	    if (std::isnan(lp)) {
+	      cerr << "WARNING: tagging log_prob = nan" << endl;
+	      continue;
+	    }
+	    assert(!std::isnan(lp) && lp >= -0.1);
+	    tagging_llh += lp;
+	    tagging_trs += sentence.size() - 1;
+	    hg.backward();
 	  }
-	  assert(!std::isnan(lp));
-          hg.backward();
-          assert(lp >= -0.1);
-          llh += lp;
-          trs += actions.size();
+
+	  // compute gradient for the parser
+	  bool PREDICT_PARSE_TREE = true;
+	  if (PREDICT_PARSE_TREE) {
+	    ComputationGraph hg;
+	    const vector<unsigned>& actions = corpus.correct_act_sent[sent_id];
+	    vector<unsigned> dummy_actions;
+	    parser.log_prob_parser(hg, sentence, actions, corpus.actions, &right, dummy_actions);
+	    double lp = as_scalar(hg.incremental_forward());
+	    if (std::isnan(lp)) { 
+	      cerr << "WARNING: log_prob = nan" << endl;
+	      continue; 
+	    }
+	    llh += lp;
+	    trs += actions.size();
+	    assert(!std::isnan(lp) && lp >= -0.1);
+	    hg.backward();
+	  }
+
+	  // hg.backward() modifies the gradient in the model for both tagging and parsing
+	  //hg.backward();
         }
         
         double gradient_l2_norm = parsing_model.gradient_l2_norm();
@@ -1665,29 +1713,33 @@ int main(int argc, char** argv) {
           parsing_model.reset_gradient();
         }
         sum_of_gradient_norms += gradient_l2_norm;
-        adam.update(1.0);
+        optimizer.update(1.0);
         
         ++si;
       }
-      adam.status();
-      cerr << "update #" << iter << " (epoch " << (epoch_count) << ")\t"  
+      optimizer.status();
+
+      // report then reset learning metrics
+      cerr << "update #" << iter << " (epoch " << (epoch_count) << ")\t"
            << "llh: " << llh 
            << " sum_of_gradient_norms: " << sum_of_gradient_norms
            << " ppl: " << exp(llh / trs) 
            << " err: " << (trs - right) / trs << endl;
-      llh = trs = right = sum_of_gradient_norms = 0;
+      cerr << "tagging update #" << iter << " (epoch " << (epoch_count) << ")\t"  
+           << "tagging_llh: " << tagging_llh 
+           << " tagging_ppl: " << exp(tagging_llh / tagging_trs) 
+           << " tagging_err: " << (tagging_trs - tagging_right) / tagging_trs << endl;
+      tagging_llh = tagging_trs = tagging_right = llh = trs = right = sum_of_gradient_norms = 0;
 
       static int logc = 0;
       ++logc;
       if ((logc < 100 && logc % 5 == 1) || 
           (logc >= 100 && logc % 25 == 1)) { // report on dev set
         unsigned dev_size = corpus.sentencesDev_count;
-        // dev_size = 100;
-        double llh = 0;
         double trs = 0;
         double right = 0;
-        double correct_heads = 0;
-        double total_heads = 0;
+        double correct_heads = 0, tagging_correct = 0;
+        double total_heads = 0, tagging_total = 0;
         auto t_start = std::chrono::high_resolution_clock::now();
         cerr << "train OOV rates:" << endl;
         cerr << "brown OOV rate is " << brown_oov_count << " / " << (brown_oov_count + brown_non_oov_count) << endl;
@@ -1696,23 +1748,35 @@ int main(int argc, char** argv) {
         cerr << "learned OOV rate is " << learned_oov_count << " / " << (learned_oov_count + learned_non_oov_count) << endl;
         brown_non_oov_count = 0, brown_oov_count = 0, brown2_non_oov_count = 0, brown2_oov_count = 0, pretrained_oov_count = 0, pretrained_non_oov_count = 0, learned_non_oov_count = 0, learned_oov_count = 0;
 
+	cerr << "dev_size = " << dev_size << endl;
         for (unsigned sii = 0; sii < dev_size; ++sii) {
-          const vector<TokenInfo>& sentence = corpus.sentencesDev[sii];
-          const vector<unsigned>& actions = corpus.correct_act_sentDev[sii];
-
+          vector<TokenInfo> sentence = corpus.sentencesDev[sii];
+          
           ComputationGraph hg;
-          vector<unsigned> pred;
-          parser.log_prob_parser(hg, sentence, vector<unsigned>(), corpus.actions, &right, pred);
-          double lp = 0;
-          //vector<unsigned> pred = parser.log_prob_parser_beam(hg,sentence,sentencePos,corpus.actions,beam_size,&lp);
-          llh -= lp;
-          trs += actions.size();
-          unordered_map<int, string> rel_ref, rel_hyp;
-	  unordered_map<int,int> ref = parser.compute_heads(sentence.size(), actions, corpus.actions, &rel_ref);
-          unordered_map<int,int> hyp = parser.compute_heads(sentence.size(), pred, corpus.actions, &rel_hyp);
-          //output_conll(sentence, corpus.intToWords, ref, hyp);
-          correct_heads += compute_correct(ref, hyp, sentence.size() - 1);
-          total_heads += sentence.size() - 1;
+
+	  if (PREDICT_COARSE_POS) {
+	    bool build_training_graph = false;
+	    double dummy;
+	    parser.log_prob_tagger(hg, sentence, &dummy, build_training_graph);
+	    for (unsigned i = 0; i < sentence.size() - 1; ++i) {
+	      ++tagging_total;
+	      if (sentence[i].predicted_coarse_pos_id == sentence[i].coarse_pos_id) { ++tagging_correct; }
+	    }
+	  }
+
+          bool PREDICT_PARSE_TREE = true;
+	  if (PREDICT_PARSE_TREE) {
+	    const vector<unsigned>& actions = corpus.correct_act_sentDev[sii];
+	    vector<unsigned> pred;
+	    parser.log_prob_parser(hg, sentence, vector<unsigned>(), corpus.actions, &right, pred);
+	    trs += actions.size();
+	    unordered_map<int, string> rel_ref, rel_hyp;
+	    unordered_map<int,int> ref = parser.compute_heads(sentence.size(), actions, corpus.actions, &rel_ref);
+	    unordered_map<int,int> hyp = parser.compute_heads(sentence.size(), pred, corpus.actions, &rel_hyp);
+	    //output_conll(sentence, corpus.intToWords, ref, hyp);
+	    correct_heads += compute_correct(ref, hyp, sentence.size() - 1);
+	    total_heads += sentence.size() - 1;
+	  }
         }
 
         cerr << "dev OOV rates:" << endl;
@@ -1724,6 +1788,8 @@ int main(int argc, char** argv) {
 
         auto t_end = std::chrono::high_resolution_clock::now();
         cerr << "  **dev (iter=" << iter << " epoch=" << (epoch_count + (1.0 * si) / min_sents_per_lang) << ")\tllh=" << llh << " ppl: " << exp(llh / trs) << " err: " << (trs - right) / trs << " uas: " << (correct_heads / total_heads) << "\t[" << dev_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
+        cerr << "tagging  **dev (iter=" << iter << " epoch=" << (epoch_count + (1.0 * si) / min_sents_per_lang) << ")" << " err: " << (tagging_total - tagging_correct) / tagging_total << " accuracy: " << (tagging_correct / tagging_total) << "\t[" << dev_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
+
         if (correct_heads > best_correct_heads) {
           best_correct_heads = correct_heads;
           ofstream out(fname);
@@ -1779,6 +1845,7 @@ int main(int argc, char** argv) {
 	input_sentence_stream >> lang_word_pos;
 	cerr << "lang_word_pos = " << lang_word_pos << endl;
 	if (lang_word_pos.size() == 0) { break; }
+	if (PREDICT_COARSE_POS) { lang_word_pos += "-UNK"; }
 	TokenInfo current_token;
 	corpus.ReadTokenInfo(lang_word_pos, current_token);
 	current_token.training_oov = (corpus.training_vocab.count(current_token.word_id) == 0);
@@ -1788,22 +1855,32 @@ int main(int argc, char** argv) {
       corpus.ReadTokenInfo("ROOT-ROOT", root_token);
       root_token.training_oov = (corpus.training_vocab.count(root_token.word_id) == 0);
       sentence.push_back(root_token);
+
+      // tag!
+      ComputationGraph cg;
+      if (PREDICT_COARSE_POS) { 
+	bool build_training_graph = false;
+	double dummy;
+	parser.log_prob_tagger(cg, sentence, &dummy, build_training_graph);
+      }
       
       // parse!
-      double right = 0;
-      ComputationGraph cg;
-      vector<unsigned> pred;
-      auto t_start = std::chrono::high_resolution_clock::now();
-      parser.log_prob_parser(cg, sentence, vector<unsigned>(), corpus.actions, &right, pred);
-      auto t_end = std::chrono::high_resolution_clock::now();
+      bool PREDICT_PARSE_TREE = true;
+      if (PREDICT_PARSE_TREE) {
+	double right = 0;
+	vector<unsigned> pred;
+	auto t_start = std::chrono::high_resolution_clock::now();
+	parser.log_prob_parser(cg, sentence, vector<unsigned>(), corpus.actions, &right, pred);
+	auto t_end = std::chrono::high_resolution_clock::now();
 
-      // compute heads
-      unordered_map<int, string> rel_hyp;
-      unordered_map<int,int> hyp = parser.compute_heads(sentence.size(), pred, corpus.actions, &rel_hyp);
-      output_conll(sentence, hyp, rel_hyp);
+	// compute heads
+	unordered_map<int, string> rel_hyp;
+	unordered_map<int,int> hyp = parser.compute_heads(sentence.size(), pred, corpus.actions, &rel_hyp);
 
-      // print output
-      cerr << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms" << endl;
+	// print output
+	output_conll(sentence, hyp, rel_hyp);
+	cerr << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms" << endl;
+      }
     }
     cerr << "The language-universal dependency parsing service has been terminated." << endl;
   } else { // do test evaluation
@@ -1811,14 +1888,25 @@ int main(int argc, char** argv) {
     double llh = 0;
     double trs = 0;
     double right = 0;
-    double correct_heads = 0;
-    double total_heads = 0;
+    double correct_heads = 0, tagging_correct = 0;
+    double total_heads = 0, tagging_total = 0;
     auto t_start = std::chrono::high_resolution_clock::now();
     unsigned corpus_size = corpus.sentencesDev_count;
     for (unsigned sii = 0; sii < corpus_size; ++sii) {
-      const vector<TokenInfo>& sentence = corpus.sentencesDev[sii];
-      const vector<unsigned>& actions=corpus.correct_act_sentDev[sii];
+      vector<TokenInfo> sentence = corpus.sentencesDev[sii];
+
       ComputationGraph cg;
+      if (PREDICT_COARSE_POS) {
+	bool build_training_graph = false;
+	double dummy;
+	parser.log_prob_tagger(cg, sentence, &dummy, build_training_graph);
+	for (unsigned i = 0 ; i < sentence.size() - 1; ++i) {
+	  if (sentence[i].predicted_coarse_pos_id == sentence[i].coarse_pos_id) { ++tagging_correct; }
+	  ++tagging_total;
+	}
+      }
+
+      const vector<unsigned>& actions = corpus.correct_act_sentDev[sii];
       double lp = 0;
       vector<unsigned> pred;
       if (beam_size == 1) {
@@ -1837,6 +1925,7 @@ int main(int argc, char** argv) {
     }
     auto t_end = std::chrono::high_resolution_clock::now();
     cerr << "TEST llh=" << llh << " ppl: " << exp(llh / trs) << " err: " << (trs - right) / trs << " uas: " << (correct_heads / total_heads) << "\t[" << corpus_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
+    cerr << "tagging TEST " << " err: " << (tagging_total - tagging_correct) / tagging_total << " accuracy: " << (tagging_correct / tagging_total) << "\t[" << corpus_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
 
   }
 }

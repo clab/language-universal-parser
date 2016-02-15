@@ -23,6 +23,7 @@ namespace cpyp {
     unsigned lang_id = 0;
     unsigned pos_id = 0;
     unsigned coarse_pos_id = 0;
+    unsigned predicted_coarse_pos_id = 0;
     bool training_oov = true;
   };
 
@@ -45,6 +46,7 @@ public:
 
    set<unsigned> training_vocab; // words available in the training corpus
    set<unsigned> training_pos_vocab; // pos available in the training corpus
+   set<unsigned> coarse_pos_vocab; // coarse pos available in any corpus
    set<unsigned> training_char_vocab; // chars available in the training corpus
    
    unsigned sentences_count = 0;
@@ -126,12 +128,13 @@ public:
       pos + "_c" :
       pos.substr(0, size_of_coarse_pos_substring);
     unsigned coarse_pos_id = get_or_add_pos(coarse_pos);
+    coarse_pos_vocab.insert(coarse_pos_id);
     string lang_word = lang_word_pos.substr(0, posIndex);
-    cerr << "lang_word_pos = " << lang_word_pos << endl;
-    cerr << "coarse_pos = " << coarse_pos << endl;
-    cerr << "coarse_pos_id = " << coarse_pos_id << endl;
-    cerr << "pos = " << pos << endl;
-    cerr << "pos_id = " << pos_id << endl << endl;
+    //cerr << "lang_word_pos = " << lang_word_pos << endl;
+    //cerr << "coarse_pos = " << coarse_pos << endl;
+    //cerr << "coarse_pos_id = " << coarse_pos_id << endl;
+    //cerr << "pos = " << pos << endl;
+    //cerr << "pos_id = " << pos_id << endl << endl;
    
     // identify the language.
     unsigned lang_id = 0;
