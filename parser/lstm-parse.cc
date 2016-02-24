@@ -94,9 +94,11 @@ double DROPOUT = 0.0;
 double BLOCK_DROPOUT_WORD_EMBEDDING = 0.0;
 double BLOCK_DROPOUT_SPELL_EMBEDDING = 0.0;
 double BLOCK_DROPOUT_PRETRAINED_EMBEDDING = 0.0;
+double BLOCK_DROPOUT_TYPOLOGY_EMBEDDING = 0.0;
 double BLOCK_DROPOUT_FINE_POS_EMBEDDING = 0.0;
 double DROPOUT_FINE_POS_EMBEDDING = 0.0;
-double BLOCK_DROPOUT_TYPOLOGY_EMBEDDING = 0.0;
+double BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING = 0.0;
+double DROPOUT_COARSE_POS_EMBEDDING = 0.0;
 
 constexpr const char* ROOT_SYMBOL = "ROOT";
 constexpr const char* UNK_BROWN = "UNK_BROWN";
@@ -172,6 +174,11 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
      "defaults at 0.0 (i.e., never dropout), must be in [0, 1]")
     ("dropout_fine_pos_embedding", po::value<double>()->default_value(0.0),
      "dropout coefficient for the fine POS embedding, "
+     "defaults at 0.0 (i.e., never dropout), must be in [0, 1]")
+    ("block_dropout_predicted_coarse_pos_embedding",
+     "(binary configuration, clear by default, specify the flat in order to set) should we block dropout the coarse POS embedding?")
+    ("dropout_coarse_pos_embedding", po::value<double>()->default_value(0.0),
+     "dropout coefficient for the coarse POS embedding, "
      "defaults at 0.0 (i.e., never dropout), must be in [0, 1]")
     ("block_dropout_typology_embedding", po::value<double>()->default_value(0.0),
      "dropout coefficient for the entire typology embedding, "
@@ -870,18 +877,31 @@ struct ParserBuilder {
 	if (corpus.training_pos_vocab.count(tokenInfo.coarse_pos_id)) {
 	  unsigned coarse_pos_id = PREDICT_COARSE_POS? tokenInfo.predicted_coarse_pos_id : tokenInfo.coarse_pos_id;
 	  Expression coarse_p = lookup(hg, p_p, coarse_pos_id);
+
+	  // Use block dropout with the coarse POS tag so that the parser can make predictions even when they are incorrect
+	  if (build_training_graph || BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING == 0.0) {
+	    coarse_p = block_dropout(coarse_p, BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING);
+	  } else if (!build_training_graph && BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING == 1.0) {
+	    coarse_p = 0.0 * coarse_p;
+	  }
+	  // Use dropout with the coarse grained POS tag if specified
+	  if (build_training_graph) {
+	    coarse_p = dropout(coarse_p, DROPOUT_COARSE_POS_EMBEDDING);
+	  }
+
+	  // Add coarse POS embedding to token representation
 	  i_i = affine_transform({i_i, coarse_p2l, coarse_p});
 	}
 	
 	// use fine grained pos embeddings if it was observed in training
 	if (corpus.training_pos_vocab.count(tokenInfo.pos_id)) {
-	  // TODO[wammar]: check the block dropout implementation here
-	  // Use block dropout with the fine grained POS tag so that the parser can make predictions even when they are missing
 	  Expression p = lookup(hg, p_p, tokenInfo.pos_id);
 	  if (tokenInfo.pos_id == 0) {
 	    // if the fine grained POS tag is not specified, do not use it.
 	    p = 0.0 * p;
 	  }
+
+	  // Use block dropout with the fine grained POS tag so that the parser can make predictions even when they are missing
 	  if (build_training_graph || BLOCK_DROPOUT_FINE_POS_EMBEDDING == 0.0) {
 	    p = block_dropout(p, BLOCK_DROPOUT_FINE_POS_EMBEDDING);
 	  } else if (!build_training_graph && BLOCK_DROPOUT_FINE_POS_EMBEDDING == 1.0) {
@@ -891,6 +911,8 @@ struct ParserBuilder {
 	  if (build_training_graph) {
 	    p = dropout(p, DROPOUT_FINE_POS_EMBEDDING);
 	  }
+
+	  // Add fine POS embedding to token representation
 	  i_i = affine_transform({i_i, p2l, p});
 	}
       }
@@ -1419,14 +1441,23 @@ int main(int argc, char** argv) {
   if (conf.count("block_dropout_pretrained_embedding")) {
     BLOCK_DROPOUT_PRETRAINED_EMBEDDING = conf["block_dropout_pretrained_embedding"].as<double>();
   }
+  if (conf.count("block_dropout_typology_embedding")) {
+    BLOCK_DROPOUT_TYPOLOGY_EMBEDDING = conf["block_dropout_typology_embedding"].as<double>();
+  }
   if (conf.count("block_dropout_fine_pos_embedding")) {
     BLOCK_DROPOUT_FINE_POS_EMBEDDING = conf["block_dropout_fine_pos_embedding"].as<double>();
   }
   if (conf.count("dropout_fine_pos_embedding")) {
     DROPOUT_FINE_POS_EMBEDDING = conf["dropout_fine_pos_embedding"].as<double>();
   }
-  if (conf.count("block_dropout_typology_embedding")) {
-    BLOCK_DROPOUT_TYPOLOGY_EMBEDDING = conf["block_dropout_typology_embedding"].as<double>();
+  if (conf.count("block_dropout_predicted_coarse_pos_embedding")) {
+    // the POS predictions must be pretty bad at the beginning. so we want to dropout all the time initially. 
+    // this block dropout coefficient is updated whenever the POS tagger is evaluated against the dev set.
+    BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING = 0.99;
+    assert(conf.count("predict_coarse_pos") == 1 && "Fatal: when the option --block_dropout_predicted_coarse_pos_embedding is specified, --predict_coarse_pos must be specified.");
+  }
+  if (conf.count("dropout_coarse_pos_embedding")) {
+    DROPOUT_COARSE_POS_EMBEDDING = conf["dropout_coarse_pos_embedding"].as<double>();
   }
 
   EPOCHS = conf["epochs"].as<unsigned>();
@@ -1789,6 +1820,14 @@ int main(int argc, char** argv) {
         auto t_end = std::chrono::high_resolution_clock::now();
         cerr << "  **dev (iter=" << iter << " epoch=" << (epoch_count + (1.0 * si) / min_sents_per_lang) << ")\tllh=" << llh << " ppl: " << exp(llh / trs) << " err: " << (trs - right) / trs << " uas: " << (correct_heads / total_heads) << "\t[" << dev_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
         cerr << "tagging  **dev (iter=" << iter << " epoch=" << (epoch_count + (1.0 * si) / min_sents_per_lang) << ")" << " err: " << (tagging_total - tagging_correct) / tagging_total << " accuracy: " << (tagging_correct / tagging_total) << "\t[" << dev_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
+
+	// if --block_dropout_predicted_coarse_pos_embedding is specified, set the dropout coefficient to the error rate of the POS tagger
+	if (BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING > 0) {
+	  float tagging_error_rate = (tagging_total - tagging_correct) / tagging_total;
+	  assert(tagging_error_rate >= 0.0 && tagging_error_rate <= 1.0 && "Fatal: tagging error rate outside the range [0,1]");
+	  BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING = tagging_error_rate;
+	  cerr << "debug: setting BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING = " << tagging_error_rate << endl;
+	}
 
         if (correct_heads > best_correct_heads) {
           best_correct_heads = correct_heads;
