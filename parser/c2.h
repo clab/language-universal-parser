@@ -21,8 +21,9 @@ namespace cpyp {
   struct TokenInfo {
     unsigned word_id = 0;
     unsigned lang_id = 0;
-    unsigned pos_id = 0;
+    unsigned pos_id = 0; // fine-grained
     unsigned coarse_pos_id = 0;
+    unsigned predicted_pos_id = 0; // fine-grained
     unsigned predicted_coarse_pos_id = 0;
     bool training_oov = true;
   };
@@ -47,6 +48,7 @@ public:
    set<unsigned> training_vocab; // words available in the training corpus
    set<unsigned> training_pos_vocab; // pos available in the training corpus
    set<unsigned> coarse_pos_vocab; // coarse pos available in any corpus
+   set<unsigned> fine_pos_vocab; // coarse pos available in any corpus
    set<unsigned> training_char_vocab; // chars available in the training corpus
    
    unsigned sentences_count = 0;
@@ -129,6 +131,7 @@ public:
       pos.substr(0, size_of_coarse_pos_substring);
     unsigned coarse_pos_id = get_or_add_pos(coarse_pos);
     coarse_pos_vocab.insert(coarse_pos_id);
+    if (!COARSE_ONLY) { fine_pos_vocab.insert(pos_id); }
     string lang_word = lang_word_pos.substr(0, posIndex);
     //cerr << "lang_word_pos = " << lang_word_pos << endl;
     //cerr << "coarse_pos = " << coarse_pos << endl;

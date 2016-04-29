@@ -1,5 +1,3 @@
-// TODO(wammar): speed-up the character-level embeddings thing
-// TODO(wammar): consider using adagrad instead of sgd
 #include <cstdlib>
 #include <algorithm>
 #include <sstream>
@@ -88,7 +86,7 @@ unsigned LSTM_CHAR_OUTPUT_DIM = 2 * 50;
 bool USE_SPELLING = false;
 
 bool USE_POS = false;
-bool PREDICT_COARSE_POS = false;
+bool PREDICT_POS = false;
 
 double DROPOUT = 0.0;
 double BLOCK_DROPOUT_WORD_EMBEDDING = 0.0;
@@ -97,7 +95,7 @@ double BLOCK_DROPOUT_PRETRAINED_EMBEDDING = 0.0;
 double BLOCK_DROPOUT_TYPOLOGY_EMBEDDING = 0.0;
 double BLOCK_DROPOUT_FINE_POS_EMBEDDING = 0.0;
 double DROPOUT_FINE_POS_EMBEDDING = 0.0;
-double BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING = 0.0;
+double BLOCK_DROPOUT_PREDICTED_POS_EMBEDDING = 0.0;
 double DROPOUT_COARSE_POS_EMBEDDING = 0.0;
 
 constexpr const char* ROOT_SYMBOL = "ROOT";
@@ -155,7 +153,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     ("train,t", "Should training be run?")
     ("parsing_model,m", po::value<string>(), "Load saved parsing_model from this file")
     ("server", "Should run the parser as a server which reads input sentences from STDIN and writes the predictiosn to STDOUT?")
-    ("predict_coarse_pos", "Should predict coarse POS tags at decoding instead of using gold annotations.")
+    ("predict_pos", "Should predict POS tags at decoding instead of using gold annotations.")
     // DROPOUT PARAMETERS
     ("dropout", po::value<double>()->default_value(0.0),
      "dropout coefficient for individual elements in the token embedding, "
@@ -175,8 +173,8 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     ("dropout_fine_pos_embedding", po::value<double>()->default_value(0.0),
      "dropout coefficient for the fine POS embedding, "
      "defaults at 0.0 (i.e., never dropout), must be in [0, 1]")
-    ("block_dropout_predicted_coarse_pos_embedding",
-     "(binary configuration, clear by default, specify the flat in order to set) should we block dropout the coarse POS embedding?")
+    ("block_dropout_predicted_pos_embedding",
+     "(binary configuration, clear by default, specify the flat in order to set) should we block dropout the POS embedding?")
     ("dropout_coarse_pos_embedding", po::value<double>()->default_value(0.0),
      "dropout coefficient for the coarse POS embedding, "
      "defaults at 0.0 (i.e., never dropout), must be in [0, 1]")
@@ -238,6 +236,7 @@ struct ParserBuilder {
   Parameters* p_word2l = 0; // lookup word embedding to LSTM input
   Parameters* p_tagging_word2l = 0; // lookup word embedding to the tagging bidirectional LSTM input
   Parameters* p_spell2l = 0; // character-based spell embedding to LSTM input
+  Parameters* p_tagging_spell2l = 0; // character-based spell embedding to the tagging bidirectional LSTM input
   Parameters* p_p2l = 0; // POS to LSTM input
   Parameters* p_coarse_p2l = 0; // coarse POS to LSTM input
   Parameters* p_pos2state = 0; // POS to parser state
@@ -258,6 +257,8 @@ struct ParserBuilder {
   Parameters* p_p2a = 0;   // parser state to action
   Parameters* p_tagging_bi2pos = 0; // bidirectional LSTM to POS (tagger)
   Parameters* p_tagging_pos_bias = 0;  // pos bias (tagger)
+  //Parameters* p_tagging_pre_softmax = 0; // if nonlinearity is specified for the tagging model, this matrix multiplies the output of the nonlinear function
+  //Parameters* p_tagging_pre_softmax_bias = 0; // if nonlinearity is specified for the tagging model, this vector is added after multiplying the output of the nonlinear function
   Parameters* p_action_start = 0;  // action bias
   Parameters* p_abias = 0;  // action bias
   Parameters* p_buffer_guard = 0;  // end of buffer
@@ -275,42 +276,43 @@ struct ParserBuilder {
   explicit ParserBuilder(Model* parsing_model) :
   tagging_forward_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, parsing_model),
   tagging_backward_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, parsing_model),
-    stack_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, parsing_model),
-    buffer_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, parsing_model),
-    action_lstm(LAYERS, ACTION_DIM + COMPRESSED_TYPOLOGY_DIM, HIDDEN_DIM, parsing_model),
-    p_w(parsing_model->add_lookup_parameters(VOCAB_SIZE, Dim({INPUT_DIM, 1}))),
+  stack_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, parsing_model),
+  buffer_lstm(LAYERS, LSTM_INPUT_DIM, HIDDEN_DIM, parsing_model),
+  action_lstm(LAYERS, ACTION_DIM + COMPRESSED_TYPOLOGY_DIM, HIDDEN_DIM, parsing_model),
+  p_w(parsing_model->add_lookup_parameters(VOCAB_SIZE, Dim({INPUT_DIM, 1}))),
   p_tagging_w(parsing_model->add_lookup_parameters(VOCAB_SIZE, Dim({INPUT_DIM, 1}))),
-    p_a(parsing_model->add_lookup_parameters(ACTION_SIZE, Dim({ACTION_DIM, 1}))),
-    p_r(parsing_model->add_lookup_parameters(ACTION_SIZE, Dim({REL_DIM, 1}))),
-    p_pbias(parsing_model->add_parameters(Dim({HIDDEN_DIM, 1}))),
-    p_A(parsing_model->add_parameters(Dim({HIDDEN_DIM, HIDDEN_DIM}))),
-    p_B(parsing_model->add_parameters(Dim({HIDDEN_DIM, HIDDEN_DIM}))),
-    p_S(parsing_model->add_parameters(Dim({HIDDEN_DIM, HIDDEN_DIM}))),
-    p_H(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_INPUT_DIM}))),
-    p_D(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_INPUT_DIM}))),
-    p_R(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, REL_DIM}))),
-    p_word2l(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, INPUT_DIM}))),
+  p_a(parsing_model->add_lookup_parameters(ACTION_SIZE, Dim({ACTION_DIM, 1}))),
+  p_r(parsing_model->add_lookup_parameters(ACTION_SIZE, Dim({REL_DIM, 1}))),
+  p_pbias(parsing_model->add_parameters(Dim({HIDDEN_DIM, 1}))),
+  p_A(parsing_model->add_parameters(Dim({HIDDEN_DIM, HIDDEN_DIM}))),
+  p_B(parsing_model->add_parameters(Dim({HIDDEN_DIM, HIDDEN_DIM}))),
+  p_S(parsing_model->add_parameters(Dim({HIDDEN_DIM, HIDDEN_DIM}))),
+  p_H(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_INPUT_DIM}))),
+  p_D(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_INPUT_DIM}))),
+  p_R(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, REL_DIM}))),
+  p_word2l(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, INPUT_DIM}))),
   p_tagging_word2l(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, INPUT_DIM}))),
-    p_spell2l(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM}))),
-    p_ib(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+  p_spell2l(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM}))),
+  p_tagging_spell2l(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM}))),
+  p_ib(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
   p_tagging_ib(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
   p_tagging_sos(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
   p_tagging_eos(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
-    p_cbias(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
-    p_p2a(parsing_model->add_parameters(Dim({ACTION_SIZE, HIDDEN_DIM}))),
-  p_tagging_bi2pos(parsing_model->add_parameters(Dim({POS_SIZE, 2 * HIDDEN_DIM}))),
+  p_cbias(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+  p_p2a(parsing_model->add_parameters(Dim({ACTION_SIZE, HIDDEN_DIM}))),
+  p_tagging_bi2pos(parsing_model->add_parameters(Dim({POS_SIZE, 2 * HIDDEN_DIM + COMPRESSED_TYPOLOGY_DIM}))),
   p_tagging_pos_bias(parsing_model->add_parameters(Dim({POS_SIZE, 1}))),
-    p_action_start(parsing_model->add_parameters(Dim({ACTION_DIM, 1}))),
-    p_abias(parsing_model->add_parameters(Dim({ACTION_SIZE, 1}))),
-
-    p_buffer_guard(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
-    p_stack_guard(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
-
-    p_start_of_word(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
-    p_end_of_word(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))), 
-
-    fw_char_lstm(LAYERS, LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM/2, parsing_model),
-    bw_char_lstm(LAYERS, LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM/2, parsing_model) {
+  p_action_start(parsing_model->add_parameters(Dim({ACTION_DIM, 1}))),
+  p_abias(parsing_model->add_parameters(Dim({ACTION_SIZE, 1}))),
+  
+  p_buffer_guard(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+  p_stack_guard(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+  
+  p_start_of_word(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
+  p_end_of_word(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))), 
+  
+  fw_char_lstm(LAYERS, LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM/2, parsing_model),
+  bw_char_lstm(LAYERS, LSTM_INPUT_DIM, LSTM_CHAR_OUTPUT_DIM/2, parsing_model) {
     
     if (USE_POS) {
       p_p = parsing_model->add_lookup_parameters(POS_SIZE, Dim({POS_DIM, 1}));
@@ -496,6 +498,7 @@ struct ParserBuilder {
       observed_to_compressed_typology = parameter(hg, p_observed_to_compressed_typology);
     }
     Expression tagging_word2l = parameter(hg, p_tagging_word2l);
+    Expression tagging_spell2l = parameter(hg, p_tagging_spell2l);
     Expression tagging_t2l;
     if (corpus.pretrained.size() > 0) {
       tagging_t2l = parameter(hg, p_tagging_t2l);
@@ -531,6 +534,14 @@ struct ParserBuilder {
     if (p_tagging_brown2l) { tagging_brown2l = parameter(hg, p_tagging_brown2l); }
     if (p_tagging_brown22l) { tagging_brown22l = parameter(hg, p_tagging_brown22l); }
 
+    // initialize character-level embeddings
+    Expression word_end = parameter(hg, p_end_of_word);
+    Expression word_start = parameter(hg, p_start_of_word); 
+    if (USE_SPELLING) {
+      fw_char_lstm.new_graph(hg);
+      bw_char_lstm.new_graph(hg);
+    }
+
     hg.incremental_forward();
 
     // compute token embeddings, which will be used as input to the bidirectional LSTM
@@ -556,6 +567,54 @@ struct ParserBuilder {
         word_embedding = 0.0 * word_embedding;
       }
       i_i = affine_transform({i_i, tagging_word2l, word_embedding});
+
+      // .. add the (learned) character-based spell embedding of this word
+      if (USE_SPELLING) {
+        Expression spell_embedding;
+        
+        // Get the surface form string.
+        vector<unsigned> &char_ids = corpus.wordIntsToCharInts[sent[i].word_id];
+        assert(char_ids.size() > 0);
+        
+        // encode this token using both left-to-right and right-to-left character LSTM
+        fw_char_lstm.start_new_sequence();
+        bw_char_lstm.start_new_sequence();
+        fw_char_lstm.add_input(word_start);
+        bw_char_lstm.add_input(word_end);
+        unsigned sequence_length = char_ids.size();
+        for (unsigned i = 0; i < sequence_length; ++i) {
+          unsigned fw_char_id = char_ids[i];
+	  // skip OOV characters (e.g., dev set is japanese while training set is english)
+          if (corpus.training_char_vocab.count(fw_char_id) > 0) {
+	    Expression fw_char_emb = lookup(hg, p_char_emb, fw_char_id);
+	    fw_char_lstm.add_input(fw_char_emb);
+	  }
+          unsigned bw_char_id = char_ids[sequence_length - i - 1];
+	  // skip OOV characters (e.g., dev set is japanese while training set is english)
+	  if (corpus.training_char_vocab.count(bw_char_id) > 0) {
+	    Expression bw_char_emb = lookup(hg, p_char_emb, bw_char_id);
+	    bw_char_lstm.add_input(bw_char_emb);
+	  }
+	}
+        fw_char_lstm.add_input(word_end);
+        bw_char_lstm.add_input(word_start);
+        Expression fw_i = fw_char_lstm.back();
+        Expression bw_i = bw_char_lstm.back();
+
+        // concatenate left-to-right and right-to-left character-based encoding
+        vector<Expression> tt = {fw_i, bw_i};
+        spell_embedding = concatenate(tt); //and this goes into the buffer...
+
+        // use block dropout to stochastically zero out the spell embedding.
+        if (build_training_graph || BLOCK_DROPOUT_SPELL_EMBEDDING == 0.0) {
+          spell_embedding = block_dropout(spell_embedding, BLOCK_DROPOUT_SPELL_EMBEDDING);
+        } else if (!build_training_graph && BLOCK_DROPOUT_SPELL_EMBEDDING == 1.0) {
+          spell_embedding = 0.0 * spell_embedding;
+        }
+        
+        // actually add the spell embedding
+        i_i = affine_transform({i_i, tagging_spell2l, spell_embedding});
+      }
       
       // .. also use brown cluster embeddings
       if (corpus.brown_clusters.size() > 0) {
@@ -643,17 +702,32 @@ struct ParserBuilder {
     for (unsigned i = 0; i < sent.size(); ++i) {
 
       // pos_scores = tagging_pos_bias + tagging_bi2pos * bi_lstm_output
-      Expression bi_lstm_output = concatenate({forward_lstm_outputs[i], backward_lstm_outputs[i]});
-      Expression pos_scores = affine_transform({tagging_pos_bias, tagging_bi2pos, bi_lstm_output});
+      Expression bi_lstm_output = concatenate({forward_lstm_outputs[i], backward_lstm_outputs[i], compressed_typology});
+      Expression tagger_state = affine_transform({tagging_pos_bias, tagging_bi2pos, bi_lstm_output});
+      Expression pos_scores;
+      //if (tagging_nonlinearity == "tanh") {
+      //pos_scores = affine_transform({tagging_pre_softmax_bias, tagging_pre_softmax, tanh(tagger_state)});
+      //} else {
+	pos_scores = tagger_state;
+      //}
       Expression pos_log_probs = log_softmax(pos_scores);
       vector<float> pos_log_probs_vector = as_vector(hg.incremental_forward());
 
-      // predict
-      unsigned most_likely_pos_id = 0;
+      // predict coarse POS tag
+      unsigned most_likely_coarse_pos_id = 0;
       for (unsigned i = 1; i < pos_log_probs_vector.size(); ++i) {
 	if (corpus.coarse_pos_vocab.count(i) == 0) { continue; }
-	if (corpus.coarse_pos_vocab.count(most_likely_pos_id) == 0 || pos_log_probs_vector[i] > pos_log_probs_vector[most_likely_pos_id]) {
-	  most_likely_pos_id = i;
+	if (corpus.coarse_pos_vocab.count(most_likely_coarse_pos_id) == 0 || pos_log_probs_vector[i] > pos_log_probs_vector[most_likely_coarse_pos_id]) {
+	  most_likely_coarse_pos_id = i;
+	}
+      }
+    
+      // predict fine POS tag
+      unsigned most_likely_fine_pos_id = 0;
+      for (unsigned i = 1; i < pos_log_probs_vector.size() && !corpus.COARSE_ONLY; ++i) {
+	if (corpus.fine_pos_vocab.count(i) == 0) { continue; }
+	if (corpus.fine_pos_vocab.count(most_likely_fine_pos_id) == 0 || pos_log_probs_vector[i] > pos_log_probs_vector[most_likely_fine_pos_id]) {
+	  most_likely_fine_pos_id = i;
 	}
       }
       
@@ -661,14 +735,29 @@ struct ParserBuilder {
       if (i == sent.size() - 1) {
 	assert(sent[i].word_id == kROOT_SYMBOL);
 	sent[i].predicted_coarse_pos_id = sent[i].coarse_pos_id;
+	if (!corpus.COARSE_ONLY) { sent[i].predicted_coarse_pos_id = sent[i].pos_id; }
       } else {
-	sent[i].predicted_coarse_pos_id = most_likely_pos_id;
-	if (build_training_graph && most_likely_pos_id == sent[i].coarse_pos_id) { (*right)++; }
+	sent[i].predicted_coarse_pos_id = most_likely_coarse_pos_id;
+	if (!corpus.COARSE_ONLY) { sent[i].predicted_pos_id = most_likely_fine_pos_id; }
+	if (build_training_graph) {
+	  bool correct_coarse = most_likely_coarse_pos_id == sent[i].coarse_pos_id;
+	  bool correct_fine = most_likely_fine_pos_id == sent[i].pos_id;
+	  if (corpus.COARSE_ONLY) {
+	    (*right) += correct_coarse; 
+	  } else {
+	    (*right) += (correct_coarse + correct_fine) / 2.0;
+	  }
+	}
       }
 
       // learn
       if (build_training_graph) {
-	Expression negative_log_prob = -pick(pos_log_probs, sent[i].coarse_pos_id);
+	Expression coarse_log_prob = - pick(pos_log_probs, sent[i].coarse_pos_id);
+	// add the fine log prob (unless --coarse_only was specified)
+	Expression negative_log_prob = 
+	  corpus.COARSE_ONLY?
+	  coarse_log_prob : 
+	  coarse_log_prob - pick(pos_log_probs, sent[i].pos_id);
 	negative_log_probs.push_back(negative_log_prob);
       }
 
@@ -869,19 +958,19 @@ struct ParserBuilder {
         // actually add the spell embedding
         i_i = affine_transform({i_i, spell2l, spell_embedding});
       }
-
+    
       // .. also use (learned) POS embeddings
       if (USE_POS) {
 
 	// use coarse pos embeddings if it was observed in training
 	if (corpus.training_pos_vocab.count(tokenInfo.coarse_pos_id)) {
-	  unsigned coarse_pos_id = PREDICT_COARSE_POS? tokenInfo.predicted_coarse_pos_id : tokenInfo.coarse_pos_id;
+	  unsigned coarse_pos_id = PREDICT_POS? tokenInfo.predicted_coarse_pos_id : tokenInfo.coarse_pos_id;
 	  Expression coarse_p = lookup(hg, p_p, coarse_pos_id);
-
+	
 	  // Use block dropout with the coarse POS tag so that the parser can make predictions even when they are incorrect
-	  if (build_training_graph || BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING == 0.0) {
-	    coarse_p = block_dropout(coarse_p, BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING);
-	  } else if (!build_training_graph && BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING == 1.0) {
+	  if (build_training_graph || BLOCK_DROPOUT_PREDICTED_POS_EMBEDDING == 0.0) {
+	    coarse_p = block_dropout(coarse_p, BLOCK_DROPOUT_PREDICTED_POS_EMBEDDING);
+	  } else if (!build_training_graph && BLOCK_DROPOUT_PREDICTED_POS_EMBEDDING == 1.0) {
 	    coarse_p = 0.0 * coarse_p;
 	  }
 	  // Use dropout with the coarse grained POS tag if specified
@@ -895,7 +984,8 @@ struct ParserBuilder {
 	
 	// use fine grained pos embeddings if it was observed in training
 	if (corpus.training_pos_vocab.count(tokenInfo.pos_id)) {
-	  Expression p = lookup(hg, p_p, tokenInfo.pos_id);
+	  unsigned fine_pos_id = PREDICT_POS? tokenInfo.predicted_pos_id : tokenInfo.pos_id;
+	  Expression p = lookup(hg, p_p, fine_pos_id);
 	  if (tokenInfo.pos_id == 0) {
 	    // if the fine grained POS tag is not specified, do not use it.
 	    p = 0.0 * p;
@@ -1249,7 +1339,7 @@ void output_conll(const vector<TokenInfo>& sentence,
   for (unsigned i = 0; i < (sentence.size()-1); ++i) {
     auto index = i + 1;
     string wit = corpus.intToWords.at(sentence[i].word_id);
-    string coarse_pos_tag = corpus.intToPos.at(PREDICT_COARSE_POS? sentence[i].predicted_coarse_pos_id : sentence[i].coarse_pos_id);
+    string coarse_pos_tag = corpus.intToPos.at(PREDICT_POS? sentence[i].predicted_coarse_pos_id : sentence[i].coarse_pos_id);
     string pit = corpus.intToPos.at(sentence[i].pos_id);
     assert(hyp.find(i) != hyp.end());
     auto hyp_head = hyp.find(i)->second + 1;
@@ -1420,12 +1510,9 @@ int main(int argc, char** argv) {
 
   // POS configurations
   USE_POS = conf.count("use_pos_tags");
-  PREDICT_COARSE_POS = conf.count("predict_coarse_pos");
+  PREDICT_POS = conf.count("predict_pos");
   corpus.COARSE_ONLY = conf.count("coarse_only");
-  if (PREDICT_COARSE_POS && !corpus.COARSE_ONLY) {
-    assert("if you specify --predict_coarse_pos, you must also specify --coarse_only." && false);
-  }
-
+  
   corpus.USE_SPELLING = USE_SPELLING = conf.count("use_spelling");
 
   if (conf.count("dropout")) { 
@@ -1450,11 +1537,11 @@ int main(int argc, char** argv) {
   if (conf.count("dropout_fine_pos_embedding")) {
     DROPOUT_FINE_POS_EMBEDDING = conf["dropout_fine_pos_embedding"].as<double>();
   }
-  if (conf.count("block_dropout_predicted_coarse_pos_embedding")) {
+  if (conf.count("block_dropout_predicted_pos_embedding")) {
     // the POS predictions must be pretty bad at the beginning. so we want to dropout all the time initially. 
     // this block dropout coefficient is updated whenever the POS tagger is evaluated against the dev set.
-    BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING = 0.99;
-    assert(conf.count("predict_coarse_pos") == 1 && "Fatal: when the option --block_dropout_predicted_coarse_pos_embedding is specified, --predict_coarse_pos must be specified.");
+    BLOCK_DROPOUT_PREDICTED_POS_EMBEDDING = 0.99;
+    assert(conf.count("predict_pos") == 1 && "Fatal: when the option --block_dropout_predicted_pos_embedding is specified, --predict_pos must be specified.");
   }
   if (conf.count("dropout_coarse_pos_embedding")) {
     DROPOUT_COARSE_POS_EMBEDDING = conf["dropout_coarse_pos_embedding"].as<double>();
@@ -1580,8 +1667,8 @@ int main(int argc, char** argv) {
       if (wc.second == 1) singletons.insert(wc.first);
   }
 
-  if (conf.count("predict_coarse_pos")) {
-    
+  if (conf.count("predict_pos")) {
+    // TODO
   }
 
   // Log some stats about the corpus.
@@ -1700,7 +1787,7 @@ int main(int argc, char** argv) {
 	  //ComputationGraph hg;
 	    
 	  // compute gradient for the tagger
-	  if (PREDICT_COARSE_POS) {
+	  if (PREDICT_POS) {
 	    ComputationGraph hg;
 	    bool build_training_graph = true;
 	    parser.log_prob_tagger(hg, sentence, &tagging_right, build_training_graph);
@@ -1785,7 +1872,7 @@ int main(int argc, char** argv) {
           
           ComputationGraph hg;
 
-	  if (PREDICT_COARSE_POS) {
+	  if (PREDICT_POS) {
 	    bool build_training_graph = false;
 	    double dummy;
 	    parser.log_prob_tagger(hg, sentence, &dummy, build_training_graph);
@@ -1821,12 +1908,12 @@ int main(int argc, char** argv) {
         cerr << "  **dev (iter=" << iter << " epoch=" << (epoch_count + (1.0 * si) / min_sents_per_lang) << ")\tllh=" << llh << " ppl: " << exp(llh / trs) << " err: " << (trs - right) / trs << " uas: " << (correct_heads / total_heads) << "\t[" << dev_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
         cerr << "tagging  **dev (iter=" << iter << " epoch=" << (epoch_count + (1.0 * si) / min_sents_per_lang) << ")" << " err: " << (tagging_total - tagging_correct) / tagging_total << " accuracy: " << (tagging_correct / tagging_total) << "\t[" << dev_size << " sents in " << std::chrono::duration<double, std::milli>(t_end-t_start).count() << " ms]" << endl;
 
-	// if --block_dropout_predicted_coarse_pos_embedding is specified, set the dropout coefficient to the error rate of the POS tagger
-	if (BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING > 0) {
+	// if --block_dropout_predicted_pos_embedding is specified, set the dropout coefficient to the error rate of the POS tagger
+	if (BLOCK_DROPOUT_PREDICTED_POS_EMBEDDING > 0) {
 	  float tagging_error_rate = (tagging_total - tagging_correct) / tagging_total;
 	  assert(tagging_error_rate >= 0.0 && tagging_error_rate <= 1.0 && "Fatal: tagging error rate outside the range [0,1]");
-	  BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING = tagging_error_rate;
-	  cerr << "debug: setting BLOCK_DROPOUT_PREDICTED_COARSE_POS_EMBEDDING = " << tagging_error_rate << endl;
+	  BLOCK_DROPOUT_PREDICTED_POS_EMBEDDING = tagging_error_rate;
+	  cerr << "debug: setting BLOCK_DROPOUT_PREDICTED_POS_EMBEDDING = " << tagging_error_rate << endl;
 	}
 
         if (correct_heads > best_correct_heads) {
@@ -1884,7 +1971,7 @@ int main(int argc, char** argv) {
 	input_sentence_stream >> lang_word_pos;
 	cerr << "lang_word_pos = " << lang_word_pos << endl;
 	if (lang_word_pos.size() == 0) { break; }
-	if (PREDICT_COARSE_POS) { lang_word_pos += "-UNK"; }
+	if (PREDICT_POS) { lang_word_pos += "-UNK"; }
 	TokenInfo current_token;
 	corpus.ReadTokenInfo(lang_word_pos, current_token);
 	current_token.training_oov = (corpus.training_vocab.count(current_token.word_id) == 0);
@@ -1897,7 +1984,7 @@ int main(int argc, char** argv) {
 
       // tag!
       ComputationGraph cg;
-      if (PREDICT_COARSE_POS) { 
+      if (PREDICT_POS) { 
 	bool build_training_graph = false;
 	double dummy;
 	parser.log_prob_tagger(cg, sentence, &dummy, build_training_graph);
@@ -1935,7 +2022,7 @@ int main(int argc, char** argv) {
       vector<TokenInfo> sentence = corpus.sentencesDev[sii];
 
       ComputationGraph cg;
-      if (PREDICT_COARSE_POS) {
+      if (PREDICT_POS) {
 	bool build_training_graph = false;
 	double dummy;
 	parser.log_prob_tagger(cg, sentence, &dummy, build_training_graph);
