@@ -255,10 +255,10 @@ struct ParserBuilder {
   Parameters* p_tagging_eos = 0; // token representation of the initial input to the backward LSTM used for tagging
   Parameters* p_cbias = 0; // composition function bias
   Parameters* p_p2a = 0;   // parser state to action
-  Parameters* p_tagging_bi2pos = 0; // bidirectional LSTM to POS (tagger)
-  Parameters* p_tagging_pos_bias = 0;  // pos bias (tagger)
-  //Parameters* p_tagging_pre_softmax = 0; // if nonlinearity is specified for the tagging model, this matrix multiplies the output of the nonlinear function
-  //Parameters* p_tagging_pre_softmax_bias = 0; // if nonlinearity is specified for the tagging model, this vector is added after multiplying the output of the nonlinear function
+  Parameters* p_tagging_bi2state = 0; // bidirectional LSTM to tagger state
+  Parameters* p_tagging_state_bias = 0;  // tagger state bias
+  Parameters* p_tagging_state2softmax = 0; // tagger state to softmax layer
+  Parameters* p_tagging_softmax_bias = 0;  // bias for the POS tagger softmax layer
   Parameters* p_action_start = 0;  // action bias
   Parameters* p_abias = 0;  // action bias
   Parameters* p_buffer_guard = 0;  // end of buffer
@@ -300,8 +300,12 @@ struct ParserBuilder {
   p_tagging_eos(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
   p_cbias(parsing_model->add_parameters(Dim({LSTM_INPUT_DIM, 1}))),
   p_p2a(parsing_model->add_parameters(Dim({ACTION_SIZE, HIDDEN_DIM}))),
-  p_tagging_bi2pos(parsing_model->add_parameters(Dim({POS_SIZE, 2 * HIDDEN_DIM + COMPRESSED_TYPOLOGY_DIM}))),
-  p_tagging_pos_bias(parsing_model->add_parameters(Dim({POS_SIZE, 1}))),
+
+  p_tagging_bi2state(parsing_model->add_parameters(Dim({HIDDEN_DIM, 2 * HIDDEN_DIM + COMPRESSED_TYPOLOGY_DIM}))),
+  p_tagging_state_bias(parsing_model->add_parameters(Dim({HIDDEN_DIM, 1}))),
+  p_tagging_state2softmax(parsing_model->add_parameters(Dim({POS_SIZE, HIDDEN_DIM}))),
+  p_tagging_softmax_bias(parsing_model->add_parameters(Dim({POS_SIZE, 1}))),
+  
   p_action_start(parsing_model->add_parameters(Dim({ACTION_DIM, 1}))),
   p_abias(parsing_model->add_parameters(Dim({ACTION_SIZE, 1}))),
   
@@ -520,9 +524,12 @@ struct ParserBuilder {
       vector<float> zeros(COMPRESSED_TYPOLOGY_DIM, 0.0);  // set x_values to change the inputs to the network
       compressed_typology = input(hg, {COMPRESSED_TYPOLOGY_DIM}, &zeros);
     }
-    // layer between bidirecationl lstm and output layer
-    Expression tagging_pos_bias = parameter(hg, p_tagging_pos_bias); // bias
-    Expression tagging_bi2pos = parameter(hg, p_tagging_bi2pos); // weight matrix
+    // layer between bidirecationl lstm and tagger state
+    Expression tagging_state_bias = parameter(hg, p_tagging_state_bias); // bias
+    Expression tagging_bi2state = parameter(hg, p_tagging_bi2state); // weight matrix
+    // softmax layer
+    Expression tagging_state2softmax = parameter(hg, p_tagging_state2softmax);
+    Expression tagging_softmax_bias = parameter(hg, p_tagging_softmax_bias);
     // bias for the token representation
     Expression tagging_ib = parameter(hg, p_tagging_ib);
     // start of sentence and end of sentence token representations
@@ -701,15 +708,12 @@ struct ParserBuilder {
     vector<Expression> negative_log_probs;
     for (unsigned i = 0; i < sent.size(); ++i) {
 
-      // pos_scores = tagging_pos_bias + tagging_bi2pos * bi_lstm_output
+      // tagger state = tagging_state_bias + tagging_bi2state * [bi_lstm_output; lang_embedding]
       Expression bi_lstm_output = concatenate({forward_lstm_outputs[i], backward_lstm_outputs[i], compressed_typology});
-      Expression tagger_state = affine_transform({tagging_pos_bias, tagging_bi2pos, bi_lstm_output});
-      Expression pos_scores;
-      //if (tagging_nonlinearity == "tanh") {
-      //pos_scores = affine_transform({tagging_pre_softmax_bias, tagging_pre_softmax, tanh(tagger_state)});
-      //} else {
-	pos_scores = tagger_state;
-      //}
+      Expression tagger_state = tanh(affine_transform({tagging_state_bias, tagging_bi2state, bi_lstm_output}));
+      
+      // softmax layer
+      Expression pos_scores = affine_transform({tagging_softmax_bias, tagging_state2softmax, tagger_state});
       Expression pos_log_probs = log_softmax(pos_scores);
       vector<float> pos_log_probs_vector = as_vector(hg.incremental_forward());
 
