@@ -140,6 +140,7 @@ void InitCommandLine(int argc, char** argv, po::variables_map* conf) {
     ("typology_mode", po::value<unsigned>()->default_value(10), "This option determines how "
      "typological embeddings are used (values: 0, 1, 2, 10, 11, 12). This option is only valid "
      "when --typological_properties is also specified.")
+    ("predict_attachments_only", "By default, we the parser is trained to predict both attachments and dependency relations (labels). If this option is specified, it only predicts attachments.")
     // NETWORK ARCHITECTURE PARAMETERS
     ("layers", po::value<unsigned>()->default_value(2), "number of LSTM layers")
     ("action_dim", po::value<unsigned>()->default_value(16), "action embedding size")
@@ -1516,7 +1517,9 @@ int main(int argc, char** argv) {
   USE_POS = conf.count("use_pos_tags");
   PREDICT_POS = conf.count("predict_pos");
   corpus.COARSE_ONLY = conf.count("coarse_only");
-  
+
+  corpus.PREDICT_ATTACHMENTS_ONLY = conf.count("predict_attachments_only");
+
   corpus.USE_SPELLING = USE_SPELLING = conf.count("use_spelling");
 
   if (conf.count("dropout")) { 

@@ -33,6 +33,7 @@ public:
 
    bool USE_SPELLING = false;
    bool COARSE_ONLY = false;
+   bool PREDICT_ATTACHMENTS_ONLY = false;
 
    map<int, vector<TokenInfo>> sentences;
    map<int, vector<TokenInfo>> sentencesDev;
@@ -396,7 +397,15 @@ inline void load_correct_actionsDev(string file) {
       }
       initial = false;
     } else if (count == 1) {
-      auto actionIter = find(actions.begin(), actions.end(), lineS);
+      size_t open_bracket_position = lineS.find('(');
+      string actionString;
+      if (PREDICT_ATTACHMENTS_ONLY && open_bracket_position != string::npos) {
+	actionString = lineS.substr(0, open_bracket_position);
+	// string label = lineS.substr(open_bracket_position, lineS.length() - open_bracket_position - 1); /*unused*/
+      } else {
+	actionString = lineS;
+      }
+      auto actionIter = find(actions.begin(), actions.end(), actionString);
       if (actionIter != actions.end()) {
         unsigned actionIndex = distance(actions.begin(), actionIter);
         correct_act_sentDev[sentence_id].push_back(actionIndex);
