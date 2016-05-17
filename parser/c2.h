@@ -247,8 +247,19 @@ public:
       else if (count == 1){
 	int i = 0;
 	bool found = false;
+
+        // current action
+	size_t open_bracket_position = lineS.find('(');
+	string actionString;
+	if (PREDICT_ATTACHMENTS_ONLY && open_bracket_position != string::npos) {
+	  actionString = lineS.substr(0, open_bracket_position);
+	  // string label = lineS.substr(open_bracket_position, lineS.length() - open_bracket_position - 1); /*unused*/
+	} else {
+	  actionString = lineS;
+	}
+
 	for (auto a: actions) {
-	  if (a==lineS) {
+	  if (a==actionString) {
 	    vector<unsigned> a = correct_act_sent[sentence];
 	    a.push_back(i);
 	    correct_act_sent[sentence]=a;
@@ -257,7 +268,7 @@ public:
 	  i++;
 	}
 	if (!found) {
-	  actions.push_back(lineS);
+	  actions.push_back(actionString);
 	  vector<unsigned> a = correct_act_sent[sentence];
 	  a.push_back(actions.size()-1);
 	  correct_act_sent[sentence] = a;
