@@ -245,10 +245,7 @@ public:
 	initial = false;
       }
       else if (count == 1){
-	int i = 0;
-	bool found = false;
-
-        // current action
+        // find the action string
 	size_t open_bracket_position = lineS.find('(');
 	string actionString;
 	if (PREDICT_ATTACHMENTS_ONLY && open_bracket_position != string::npos) {
@@ -258,21 +255,17 @@ public:
 	  actionString = lineS;
 	}
 
-	for (auto a: actions) {
-	  if (a==actionString) {
-	    vector<unsigned> a = correct_act_sent[sentence];
-	    a.push_back(i);
-	    correct_act_sent[sentence]=a;
-	    found = true;
-	  }
-	  i++;
-	}
-	if (!found) {
+	// add the index of this action to the vector of correct actions for this sentence
+	auto actionIter = find(actions.begin(), actions.end(), actionString);
+	if (actionIter == actions.end()) {
 	  actions.push_back(actionString);
-	  vector<unsigned> a = correct_act_sent[sentence];
-	  a.push_back(actions.size()-1);
-	  correct_act_sent[sentence] = a;
+	  cerr << "adding " << actionString << "to the list of possible actions" << endl;
+	  actionIter = find(actions.begin(), actions.end(), actionString);
+	  assert(actionIter != actions.end());
 	}
+	unsigned actionIndex = distance(actions.begin(), actionIter);
+	correct_act_sent[sentence].push_back(actionIndex);
+	
 	count = 0;
       }
     }
@@ -421,6 +414,8 @@ inline void load_correct_actionsDev(string file) {
         unsigned actionIndex = distance(actions.begin(), actionIter);
         correct_act_sentDev[sentence_id].push_back(actionIndex);
       } else {
+	cerr << "new actionString in dev set: " << actionString << endl;
+	assert(false);
         // TODO: right now, new actions which haven't been observed in training
         // are not added to correct_act_sentDev. This may be a problem if the
         // training data is little.
