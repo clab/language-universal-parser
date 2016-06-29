@@ -34,6 +34,7 @@ make -j 10
 ```
 
 # What to cite?
-[One Parser, Many Languages](http://arxiv.org/abs/1602.01595)
+[One Parser, Many Languages](http://arxiv.org/abs/1602.01595) TACL 2016 (to appear)
 Waleed Ammar, George Mulcaire, Miguel Ballesteros, Chris Dyer, Noah A. Smith
-arXiv:1602.01595
+
+[results](https://github.com/clab/language-universal-parser/tree/084eed3b1510fc893c4c92474cdcea1d7c58aa7c)
