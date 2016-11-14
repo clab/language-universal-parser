@@ -2,8 +2,11 @@
 * boost-1.60.0
 * eigen `hg clone https://bitbucket.org/eigen/eigen`
 
+# Language typology embeddings
+To enable language typology embeddings, use the following command line argument `--typological_properties typology_file`. Sample typology files have been provided in the subdirectory `typological_properties/`. If you enable typology embeddings, please prefix each word in the input files (e.g., `en:book` instead of `book`). The two-letter prefix should match the first field in the typology file.
+
 # How to generate arc-standard transitions?
-The parser expects projective treebanks with arc-standard transitions as input (see command lines below). To convert nonprojective treebanks in CoNLL 2006 format to the arc-std oracle files of the pseudo-projective treebanks:    
+The parser expects projective treebanks with arc-standard transitions as input (see command lines below). To convert nonprojective treebanks in CoNLL 2006 format to the arc-std oracle files of the pseudo-projective treebanks:
 ```    
 java -jar maltparser-1.8.1.jar -c pproj -m proj -i $split_lc -o $split_projective -pp baseline
 java -jar ParserOracleArcStd.jar -t -1 -l 1 -c treebank.conll -i treebank.conll > treebank.arcstd
