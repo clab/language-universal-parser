@@ -1,3 +1,3 @@
-[submodule "cnn"]
-	path = cnn
-	url = git@github.com:clab/cnn.git
+[submodule "dynet"]
+	path = dynet
+	url = git@github.com:clab/dynet.git

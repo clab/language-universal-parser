@@ -20,12 +20,12 @@
 #include <boost/archive/text_iarchive.hpp>
 #include <boost/program_options.hpp>
 
-#include "cnn/training.h"
-#include "cnn/cnn.h"
-#include "cnn/expr.h"
-#include "cnn/nodes.h"
-#include "cnn/lstm.h"
-#include "cnn/rnn.h"
+#include "dynet/training.h"
+#include "dynet/dynet.h"
+#include "dynet/expr.h"
+#include "dynet/nodes.h"
+#include "dynet/lstm.h"
+#include "dynet/rnn.h"
 #include "c2.h"
 
 cpyp::Corpus corpus;
@@ -113,8 +113,8 @@ unsigned BROWN_CLUSTERS_COUNT = 0;
 unsigned BROWN2_CLUSTERS_COUNT = 0;
 string SCORE_FILENAME = "";
 
-using namespace cnn::expr;
-using namespace cnn;
+using namespace dynet::expr;
+using namespace dynet;
 using namespace std;
 using namespace cpyp;
 namespace po = boost::program_options;
@@ -1503,7 +1503,7 @@ void load_brown2_clusters(std::string& filename) {
 int main(int argc, char** argv) {
   //unsigned random_seed = 0; // the seed is read from the clock
   unsigned random_seed = 11; // the seed is fixed everytime (to reproduce stuff)
-  cnn::Initialize(argc, argv, random_seed);
+  dynet::Initialize(argc, argv, random_seed);
 
   cerr << "COMMAND:"; 
   for (unsigned i = 0; i < static_cast<unsigned>(argc); ++i) cerr << ' ' << argv[i];
@@ -1786,7 +1786,7 @@ int main(int argc, char** argv) {
           if (unk_strategy == 1) {
             for (auto &tokenInfo : sentence) {
 	      assert(!tokenInfo.training_oov);
-	      tokenInfo.training_oov = (singletons.count(tokenInfo.word_id) && cnn::rand01() < unk_prob);
+	      tokenInfo.training_oov = (singletons.count(tokenInfo.word_id) && dynet::rand01() < unk_prob);
             }
           }
 
