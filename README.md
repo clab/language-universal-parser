@@ -11,12 +11,12 @@ git clone git@github.com:clab/language-universal-parser.git
 cd language-universal-parser
 git submodule init
 git submodule update
-cd cnn
+cd dynet
 git pull origin master
 cd ../
 
-# build the parser (with latest version of cnn) #
-cd ~/git/language-universal-parser/cnn
+# build the parser (with latest version of dynet) #
+cd ~/git/language-universal-parser/dynet
 git pull origin master
 cd .. ; mkdir build-gpu ; cd build-gpu
 cmake -DEIGEN3_INCLUDE_DIR=$EIGEN_ROOT ..  # -DBACKEND=cuda is not supported just yet
